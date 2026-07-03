@@ -1,0 +1,8 @@
+node_modules/
+.env
+images/*
+!images/.gitkeep
+npm-debug.log*
+.DS_Store
+scratch/
+*.local

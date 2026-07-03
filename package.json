@@ -1,0 +1,27 @@
+{
+  "name": "test-merchant-site",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Test merchant e-commerce site for the GurzuVTO 'Custom Pull' connector. Exposes a token-protected, paginated catalog in the merchant's OWN field shape (not GurzuVTO's), backed by Postgres, populated from real meesa.shop data.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "scrape": "node scripts/scrape.mjs",
+    "db:init": "node scripts/db-init.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "audit": "node scripts/audit.mjs",
+    "db:pull-example": "node scripts/db-pull-example.mjs",
+    "test:endpoints": "bash scripts/test-endpoints.sh",
+    "notify:receiver": "node scripts/mock-notify-receiver.mjs",
+    "phase2": "node scripts/phase2-demo.mjs"
+  },
+  "dependencies": {
+    "dotenv": "16.4.5",
+    "express": "4.19.2",
+    "pg": "8.12.0"
+  }
+}
