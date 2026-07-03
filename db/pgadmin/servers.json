@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "Meesa Catalog",
+      "Group": "Servers",
+      "Host": "db",
+      "Port": 5432,
+      "MaintenanceDB": "merchant_catalog",
+      "Username": "merchant",
+      "SSLMode": "prefer",
+      "Comment": "Test merchant catalog — auto-registered. Password: merchant_pw"
+    }
+  }
+}
