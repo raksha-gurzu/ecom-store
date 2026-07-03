@@ -1,0 +1,289 @@
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║ Scrape meesa.shop → merchant catalog DB (v2).                              ║
+// ║                                                                           ║
+// ║ Per product: download the FULL image gallery, discover the REAL variant   ║
+// ║ matrix + stock via /variation_stock, assign each colour a lead image,     ║
+// ║ seed the §5 coercion traps, and upsert in the merchant's OWN shape.        ║
+// ║ Idempotent (stable ids; options + images replaced wholesale per run).      ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+import "dotenv/config";
+import fs from "node:fs/promises";
+import fssync from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { pool } from "../src/db.js";
+import {
+  collectCategorySlugs, parseProduct, fetchVariants, fetchBuffer, cleanText, sleep,
+} from "./lib/meesa.mjs";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const IMAGES_DIR = path.resolve(__dirname, "..", "images");
+
+const CATEGORIES = [
+  "clothing", "jewellery", "skincare", "bags", "innerwear", "earrings",
+  "crochet", "dresses", "kurta", "bras", "sun-screen", "tops",
+];
+const CAP_PER_CATEGORY = 50;
+const MAX_GALLERY = 8;          // images downloaded per product
+const PRODUCT_CONCURRENCY = 6;
+
+// Absolute base for stored image URLs — so DB consumers (the engine's db-pull,
+// which reads raw rows) get directly downloadable links, not relative /img paths.
+const BASE = (process.env.PUBLIC_BASE_URL || "http://localhost:4000").replace(/\/$/, "");
+
+// ── utils ────────────────────────────────────────────────────────────────────
+const hashInt = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; };
+const slugSafe = (s) => String(s).toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-|-$/g, "");
+const ext = (type) => (type.includes("png") ? "png" : type.includes("webp") ? "webp" : "jpg");
+
+function quirkFor(i, isSimple) {
+  if (i % 17 === 5) return "cents";
+  if (i % 17 === 11) return "currency_string";
+  if (i % 13 === 7) return "stock_text";
+  if (!isSimple && i % 19 === 3) return "array_options";
+  return "normal";
+}
+
+async function mapPool(items, concurrency, fn) {
+  const results = []; let idx = 0;
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (idx < items.length) {
+      const my = idx++;
+      try { results[my] = await fn(items[my], my); }
+      catch (err) { results[my] = { error: String(err.message || err) }; }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+// Download the gallery; returns ordered local "/img/.." paths (cached on disk).
+async function downloadGallery(slug, urls) {
+  const paths = [];
+  for (let i = 0; i < Math.min(urls.length, MAX_GALLERY); i++) {
+    try {
+      const existing = ["jpg", "png", "webp"].find((e) =>
+        fssync.existsSync(path.join(IMAGES_DIR, `${slug}-${i}.${e}`)));
+      if (existing) { paths.push(`${BASE}/img/${slug}-${i}.${existing}`); continue; }
+      const { buf, type } = await fetchBuffer(urls[i]);
+      if (!type.startsWith("image/") || buf.length < 512) continue;
+      const file = `${slug}-${i}.${ext(type)}`;
+      await fs.writeFile(path.join(IMAGES_DIR, file), buf);
+      paths.push(`${BASE}/img/${file}`);
+    } catch { /* degrade: skip this image */ }
+  }
+  return paths;
+}
+
+// Lead image for a colour: each distinct colour gets its own gallery photo.
+function leadPhotoFn(colourOrder, photos) {
+  return (colourClean) => {
+    if (!photos.length) return null;
+    if (!colourClean) return photos[0];
+    const idx = colourOrder.indexOf(colourClean);
+    return photos[(idx < 0 ? 0 : idx) % photos.length];
+  };
+}
+
+// Build option rows from the REAL variant matrix (preferred).
+function optionsFromReal(real, photos, price, currency) {
+  const colourOrder = [...new Set(real.map((v) => cleanText(v.colour || "")).filter(Boolean))];
+  const lead = leadPhotoFn(colourOrder, photos);
+  const seen = new Set();
+  const rows = [];
+  real.forEach((v, pos) => {
+    const colour = cleanText(v.colour || "") || null;
+    const size = cleanText(v.size || "") || null;
+    let sku = [slugSafe(v._slug), size ? slugSafe(size) : "NA", colour ? slugSafe(colour) : "NA"].join("__");
+    while (seen.has(sku)) sku = `${sku}-${pos}`;
+    seen.add(sku);
+    rows.push({
+      sku, size, colour, amount: price, currency,
+      stock: v.stock, in_stock: v.in_stock, variation_id: v.variation_id,
+      photo: lead(colour), position: pos,
+    });
+  });
+  return rows;
+}
+
+// Fallback: cartesian product with synthesized stock (when meesa exposes no real
+// variations for a product that still has option axes).
+function optionsFromAxes(slug, coloursRaw, sizesRaw, photos, price, currency) {
+  const colours = [...new Set(coloursRaw.map(cleanText).filter(Boolean))];
+  const sizes = [...new Set(sizesRaw.map(cleanText).filter(Boolean))];
+  const cs = colours.length ? colours : [null];
+  const ss = sizes.length ? sizes : [null];
+  const lead = leadPhotoFn(colours, photos);
+  const seen = new Set();
+  const rows = [];
+  let pos = 0;
+  for (const colour of cs) for (const size of ss) {
+    let sku = [slugSafe(slug), size ? slugSafe(size) : "NA", colour ? slugSafe(colour) : "NA"].join("__");
+    while (seen.has(sku)) sku = `${sku}-${pos}`;
+    seen.add(sku);
+    const stock = hashInt(sku) % 31;
+    rows.push({ sku, size, colour, amount: price, currency, stock, in_stock: stock > 0, variation_id: null, photo: lead(colour), position: pos++ });
+  }
+  return rows;
+}
+
+async function upsertProduct(client, prod, options, images) {
+  await client.query(
+    `INSERT INTO product_groups
+       (sku_group, title, long_desc, page_url, brand_name, dept, source_url,
+        is_simple, base_amount, base_stock, base_photo, serialize_quirk, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
+     ON CONFLICT (sku_group) DO UPDATE SET
+       title=EXCLUDED.title, long_desc=EXCLUDED.long_desc, page_url=EXCLUDED.page_url,
+       brand_name=EXCLUDED.brand_name, dept=EXCLUDED.dept, source_url=EXCLUDED.source_url,
+       is_simple=EXCLUDED.is_simple, base_amount=EXCLUDED.base_amount,
+       base_stock=EXCLUDED.base_stock, base_photo=EXCLUDED.base_photo,
+       serialize_quirk=EXCLUDED.serialize_quirk, updated_at=now()`,
+    [prod.sku_group, prod.title, prod.long_desc, prod.page_url, prod.brand_name,
+     prod.dept, prod.source_url, prod.is_simple, prod.base_amount, prod.base_stock,
+     prod.base_photo, prod.serialize_quirk]
+  );
+  await client.query("DELETE FROM options WHERE sku_group = $1", [prod.sku_group]);
+  for (const o of options) {
+    await client.query(
+      `INSERT INTO options (sku, sku_group, size, colour, amount, currency, stock, in_stock, variation_id, photo, position)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [o.sku, prod.sku_group, o.size, o.colour, o.amount, o.currency, o.stock,
+       o.in_stock ?? (o.stock > 0), o.variation_id ?? null, o.photo, o.position]
+    );
+  }
+  await client.query("DELETE FROM product_images WHERE sku_group = $1", [prod.sku_group]);
+  for (let i = 0; i < images.length; i++) {
+    await client.query(
+      `INSERT INTO product_images (sku_group, position, photo, alt) VALUES ($1,$2,$3,$4)`,
+      [prod.sku_group, i, images[i], prod.title]
+    );
+  }
+}
+
+async function main() {
+  await fs.mkdir(IMAGES_DIR, { recursive: true });
+  console.log(`[scrape] categories: ${CATEGORIES.join(", ")}`);
+
+  // 1. collect unique slugs
+  const seen = new Set();
+  const slugs = [];
+  for (const cat of CATEGORIES) {
+    const found = await collectCategorySlugs(cat, CAP_PER_CATEGORY);
+    let added = 0;
+    for (const s of found) if (!seen.has(s)) { seen.add(s); slugs.push(s); added++; }
+    console.log(`[scrape] ${cat}: ${found.length} found, +${added} new (total ${slugs.length})`);
+  }
+
+  // 2. ONE pipeline per product: parse → download gallery IMMEDIATELY (meesa's
+  //    signed image URLs expire in ~300s, so we must not batch downloads for
+  //    later) → fetch the real variant matrix. Order matters: fresh URLs.
+  console.log(`[scrape] processing ${slugs.length} products (parse + gallery + real variants)…`);
+  let done = 0;
+  const processed = await mapPool(slugs, PRODUCT_CONCURRENCY, async (slug) => {
+    const p = await parseProduct(slug);
+    if (!p || !p.name) return null;
+    const photos = await downloadGallery(p.slug, p.gallery); // fresh signed URLs
+    const hasAxes = p.colours.length > 0 || p.sizes.length > 0;
+    let options = [], realVar = false;
+    if (hasAxes) {
+      const real = (await fetchVariants(p.slug, p.colours, p.sizes)).map((v) => ({ ...v, _slug: p.slug }));
+      if (real.length) { options = optionsFromReal(real, photos, p.price, p.currency); realVar = true; }
+      else options = optionsFromAxes(p.slug, p.colours, p.sizes, photos, p.price, p.currency);
+    }
+    if (++done % 25 === 0) console.log(`[scrape]   ${done}/${slugs.length} processed`);
+    return { p, photos, options, realVar };
+  });
+
+  // 3. assemble rows deterministically (quirks/traps by stable index, no races)
+  let trapStats = {}, simpleCount = 0, realVariantProducts = 0, brokenAssigned = false;
+  const rows = [];
+  processed.filter((r) => r && !r.error).forEach((r, i) => {
+    const { p, photos } = r;
+    let options = r.options;
+    if (r.realVar) realVariantProducts++;
+    const isSimple = options.length === 0;
+    if (isSimple) simpleCount++;
+    const quirk = quirkFor(i, isSimple);
+    trapStats[quirk] = (trapStats[quirk] || 0) + 1;
+
+    const product = {
+      sku_group: p.slug,
+      title: p.name,
+      long_desc: p.description || `<p>${p.name}</p>`,
+      page_url: p.page_url,
+      brand_name: p.brand,
+      dept: p.dept,
+      source_url: p.source_url,
+      is_simple: isSimple,
+      base_amount: isSimple ? p.price : null,
+      base_stock: isSimple ? (p.outOfStock ? 0 : hashInt(p.slug) % 31) : null,
+      base_photo: isSimple ? (photos[0] || null) : null,
+      serialize_quirk: quirk,
+    };
+
+    if (!brokenAssigned && options.length) {
+      options = [{ ...options[0], photo: `${BASE}/img/__broken__.jpg` }, ...options.slice(1)];
+      brokenAssigned = true;
+    }
+    rows.push({ product, options, images: photos });
+  });
+
+  // 4. guarantee trap coverage
+  for (const q of ["cents", "currency_string", "stock_text", "array_options"]) {
+    if (trapStats[q]) continue;
+    const victim = rows.find((r) => r.product.serialize_quirk === "normal" && (q !== "array_options" || r.options.length));
+    if (victim) { victim.product.serialize_quirk = q; trapStats[q] = 1; }
+  }
+  // 4a. the stock_text trap only renders "out of stock" when a value is 0 — with
+  // real stock that may never happen, so force one zero-stock stock_text item.
+  const st = rows.find((r) => r.product.serialize_quirk === "stock_text" && (r.options.length || r.product.is_simple));
+  if (st) {
+    if (st.product.is_simple) st.product.base_stock = 0;
+    else st.options[0] = { ...st.options[0], stock: 0, in_stock: false };
+  }
+  // 4b. guarantee simple products
+  const SIMPLE_TARGET = 6;
+  if (simpleCount < SIMPLE_TARGET) {
+    const victims = rows.filter((r) => !r.product.is_simple && r.options.length).slice(0, SIMPLE_TARGET - simpleCount);
+    victims.forEach((r, k) => {
+      const first = r.options[0];
+      r.product.is_simple = true;
+      r.product.base_amount = first.amount;
+      r.product.base_stock = first.stock;
+      r.product.base_photo = first.photo;
+      if (k === 0) r.product.serialize_quirk = "cents";
+      r.options = [];
+      simpleCount++;
+    });
+  }
+  // 4c. guarantee a missing-optional field (drop brand on a deterministic slice)
+  let brandDropped = 0;
+  for (const r of rows) if (hashInt(r.product.sku_group) % 7 === 0) { r.product.brand_name = null; brandDropped++; }
+  if (!brandDropped && rows.length) { rows[0].product.brand_name = null; }
+
+  // 5. persist
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const { product, options, images } of rows) await upsertProduct(client, product, options, images);
+    await client.query("COMMIT");
+  } catch (err) { await client.query("ROLLBACK"); throw err; } finally { client.release(); }
+
+  const totalOptions = rows.reduce((n, r) => n + r.options.length, 0);
+  const totalImages = rows.reduce((n, r) => n + r.images.length, 0);
+  console.log(`\n[scrape] DONE`);
+  console.log(`  products:                 ${rows.length}`);
+  console.log(`  options (real variants):  ${totalOptions}  (${realVariantProducts} products had real variations)`);
+  console.log(`  gallery images:           ${totalImages}`);
+  console.log(`  simple (no-variant):      ${simpleCount}`);
+  console.log(`  serialize quirks:         ${JSON.stringify(trapStats)}`);
+  console.log(`  broken-image trap:        ${brokenAssigned ? "1 option" : "none"}`);
+  await pool.end();
+}
+
+main().catch(async (err) => {
+  console.error("[scrape] FAILED:", err);
+  await pool.end().catch(() => {});
+  process.exit(1);
+});
