@@ -1,0 +1,78 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Test merchant site stack:
+#   db   — Postgres 16, holds the merchant catalog in the merchant's OWN shape.
+#          Bootstraps the SELECT-only `gurzu_readonly` role via db/schema.sql.
+#   app  — Express site serving the token-protected catalog + public images.
+#
+# The scraper (npm run scrape) is run on demand from the host against the
+# published Postgres port, or via `docker compose run --rm app npm run scrape`.
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+  db:
+    image: postgres:16
+    # Auto-restart: bring this back after a crash, a Docker restart, or a reboot.
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: merchant
+      POSTGRES_PASSWORD: merchant_pw
+      POSTGRES_DB: merchant_catalog
+    # Host 5433 → container 5432 (5432 is often taken by a local Postgres).
+    # The host scraper/app connect on 5433; inside the compose net it's db:5432.
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # schema.sql runs once on first init (creates tables + readonly role).
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U merchant -d merchant_catalog"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    # Auto-restart: if the app crashes or the laptop reboots, Docker brings it
+    # back up on its own — so it can't silently drop during an engine sync.
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: 4000
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:4000}
+      READ_TOKEN: ${READ_TOKEN:-merchant_demo_readonly_token_abc123}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-merchant_demo_admin_token_def456}
+      HMAC_SECRET: ${HMAC_SECRET:-demo_shared_hmac_secret_xyz789}
+      GURZU_NOTIFY_URL: ${GURZU_NOTIFY_URL:-http://localhost:8000/v1/integrations/custom-pull/notify}
+      # Inside the compose network Postgres is reachable as host `db`.
+      DATABASE_URL: postgres://merchant:merchant_pw@db:5432/merchant_catalog
+      READONLY_DATABASE_URL: postgres://gurzu_readonly:readonly_pw@db:5432/merchant_catalog
+    ports:
+      - "4000:4000"
+    volumes:
+      # Persist + share downloaded images between host scraper and container.
+      - ./images:/app/images
+
+  # pgAdmin — browser-based database viewer. The "Meesa Catalog" server is
+  # pre-registered (db:5432) via servers.json, so it shows up automatically; you
+  # only type the password (merchant_pw) the first time you expand it.
+  pgadmin:
+    image: dpage/pgadmin4
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: "False"   # desktop mode — no pgAdmin login
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./db/pgadmin/servers.json:/pgadmin4/servers.json:ro
+
+volumes:
+  pgdata:
+  pgadmin_data:
