@@ -1,0 +1,162 @@
+/* GurzuVTO "Search & Try-On" side panel.
+   Everything is prefixed .gvto- and lives under #gvto-root / #gvto-launch so it
+   cannot leak into the store's own styles. Design tokens (--pink, --line, …)
+   are inherited from store.css rather than redefined. */
+
+#gvto-launch{
+  position:fixed;right:22px;bottom:22px;z-index:60;
+  display:flex;align-items:center;gap:9px;
+  padding:13px 20px;border:0;border-radius:999px;cursor:pointer;
+  background:var(--pink,#e11d74);color:#fff;
+  font:600 14px/1 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  box-shadow:0 6px 22px rgba(225,29,116,.38);transition:.15s;
+}
+#gvto-launch:hover{background:var(--pink-dark,#b9135c);transform:translateY(-1px)}
+
+#gvto-root{position:fixed;inset:0;z-index:70;pointer-events:none;visibility:hidden}
+#gvto-root.gvto-open{pointer-events:auto;visibility:visible}
+
+#gvto-root .gvto-scrim{
+  position:absolute;inset:0;background:rgba(31,36,48,.42);
+  opacity:0;transition:opacity .22s;
+}
+#gvto-root.gvto-open .gvto-scrim{opacity:1}
+
+#gvto-root .gvto-panel{
+  position:absolute;top:0;right:0;height:100%;width:min(460px,100vw);
+  display:flex;flex-direction:column;background:#fff;
+  box-shadow:-8px 0 34px rgba(16,24,40,.18);
+  transform:translateX(100%);transition:transform .24s ease;
+  font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--ink,#1f2430);
+}
+#gvto-root.gvto-open .gvto-panel{transform:translateX(0)}
+
+#gvto-root .gvto-head{
+  display:flex;align-items:center;gap:10px;flex:0 0 auto;
+  padding:16px 18px;border-bottom:1px solid var(--line,#ececf0);
+}
+#gvto-root .gvto-title{font-size:16px;font-weight:700;margin:0}
+#gvto-root .gvto-sub{font-size:12px;color:var(--muted,#6b7280);margin:2px 0 0}
+#gvto-root .gvto-x{
+  margin-left:auto;border:0;background:none;cursor:pointer;
+  font-size:22px;line-height:1;color:var(--muted,#6b7280);padding:4px 6px;border-radius:8px;
+}
+#gvto-root .gvto-x:hover{background:var(--bg-soft,#fafafa);color:var(--ink,#1f2430)}
+
+#gvto-root .gvto-body{flex:1 1 auto;overflow-y:auto;padding:16px 18px 26px}
+#gvto-root .gvto-sect{margin-bottom:22px}
+#gvto-root .gvto-sect-t{
+  font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;
+  color:var(--muted,#6b7280);margin:0 0 10px;
+}
+
+/* search */
+#gvto-root .gvto-searchrow{display:flex;gap:8px}
+#gvto-root .gvto-input{
+  flex:1;min-width:0;padding:10px 14px;font-size:14px;
+  border:1px solid var(--line,#ececf0);border-radius:999px;
+  background:var(--bg-soft,#fafafa);outline:none;color:inherit;
+}
+#gvto-root .gvto-input:focus{border-color:var(--pink,#e11d74);background:#fff;box-shadow:0 0 0 3px var(--pink-soft,#fde7f1)}
+#gvto-root .gvto-btn{
+  border:0;border-radius:999px;cursor:pointer;padding:10px 18px;
+  background:var(--pink,#e11d74);color:#fff;font:600 14px/1.2 inherit;transition:.12s;
+}
+#gvto-root .gvto-btn:hover:not(:disabled){background:var(--pink-dark,#b9135c)}
+#gvto-root .gvto-btn:disabled{opacity:.45;cursor:not-allowed}
+#gvto-root .gvto-btn-wide{width:100%;padding:12px}
+#gvto-root .gvto-btn-ghost{
+  background:#fff;color:var(--ink,#1f2430);border:1px solid var(--line,#ececf0);
+  padding:7px 13px;font-size:13px;
+}
+#gvto-root .gvto-btn-ghost:hover:not(:disabled){border-color:var(--pink,#e11d74);color:var(--pink,#e11d74);background:#fff}
+
+/* result cards */
+#gvto-root .gvto-hits{display:flex;flex-direction:column;gap:10px}
+#gvto-root .gvto-hit{
+  display:flex;gap:11px;align-items:center;padding:9px;
+  border:1px solid var(--line,#ececf0);border-radius:12px;background:#fff;
+}
+#gvto-root .gvto-hit img{
+  width:62px;height:62px;flex:0 0 auto;border-radius:9px;
+  object-fit:cover;background:var(--pink-soft,#fde7f1);
+}
+#gvto-root .gvto-hit-b{min-width:0;flex:1}
+#gvto-root .gvto-hit-n{
+  font-size:13.5px;font-weight:600;margin:0 0 3px;line-height:1.3;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+#gvto-root .gvto-hit-p{font-size:13px;font-weight:700;color:var(--ink,#1f2430);margin:0}
+#gvto-root .gvto-hit-d{font-size:11.5px;color:var(--muted,#6b7280);margin:2px 0 0}
+
+/* tray */
+#gvto-root .gvto-chips{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
+#gvto-root .gvto-chip{
+  display:flex;align-items:center;gap:7px;max-width:100%;
+  padding:5px 6px 5px 5px;border-radius:999px;
+  background:var(--pink-soft,#fde7f1);color:var(--pink-dark,#b9135c);font-size:12.5px;font-weight:600;
+}
+#gvto-root .gvto-chip img{width:24px;height:24px;border-radius:50%;object-fit:cover;flex:0 0 auto}
+#gvto-root .gvto-chip span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:150px}
+#gvto-root .gvto-chip button{
+  border:0;background:none;cursor:pointer;color:inherit;
+  font-size:15px;line-height:1;padding:0 4px;opacity:.7;
+}
+#gvto-root .gvto-chip button:hover{opacity:1}
+
+/* photo picker */
+#gvto-root .gvto-drop{
+  display:flex;align-items:center;gap:12px;padding:12px;
+  border:1px dashed var(--line,#ececf0);border-radius:12px;background:var(--bg-soft,#fafafa);
+}
+#gvto-root .gvto-drop img{width:52px;height:52px;border-radius:9px;object-fit:cover;flex:0 0 auto}
+#gvto-root .gvto-drop-t{font-size:13px;margin:0}
+#gvto-root .gvto-drop-h{font-size:11.5px;color:var(--muted,#6b7280);margin:3px 0 0}
+#gvto-root .gvto-file{display:none}
+
+/* result tiles */
+#gvto-root .gvto-tiles{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+#gvto-root .gvto-tile{
+  border:1px solid var(--line,#ececf0);border-radius:12px;overflow:hidden;background:#fff;
+  display:flex;flex-direction:column;
+}
+#gvto-root .gvto-tile-img{
+  position:relative;aspect-ratio:3/4;background:var(--pink-soft,#fde7f1);
+  display:flex;align-items:center;justify-content:center;
+}
+#gvto-root .gvto-tile-img img{width:100%;height:100%;object-fit:cover}
+#gvto-root .gvto-tile-b{padding:8px 10px 10px}
+#gvto-root .gvto-tile-n{
+  font-size:12px;font-weight:600;margin:0 0 5px;line-height:1.3;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+}
+#gvto-root .gvto-state{font-size:11.5px;color:var(--muted,#6b7280);display:flex;align-items:center;gap:6px}
+#gvto-root .gvto-state.gvto-bad{color:#b91c1c}
+#gvto-root .gvto-spin{
+  width:11px;height:11px;flex:0 0 auto;border-radius:50%;
+  border:2px solid var(--pink-soft,#fde7f1);border-top-color:var(--pink,#e11d74);
+  animation:gvto-spin .8s linear infinite;
+}
+@keyframes gvto-spin{to{transform:rotate(360deg)}}
+#gvto-root .gvto-dl{
+  display:inline-block;margin-top:7px;font-size:12px;font-weight:600;
+  color:var(--pink,#e11d74);text-decoration:none;cursor:pointer;
+}
+#gvto-root .gvto-dl:hover{text-decoration:underline}
+#gvto-root .gvto-err{
+  font-size:11.5px;color:#b91c1c;margin:5px 0 0;line-height:1.4;
+  word-break:break-word;
+}
+
+/* notices */
+#gvto-root .gvto-note{
+  padding:11px 13px;border-radius:10px;font-size:13px;line-height:1.45;
+  background:var(--bg-soft,#fafafa);color:var(--muted,#6b7280);border:1px solid var(--line,#ececf0);
+}
+#gvto-root .gvto-note.gvto-bad{background:#fef2f2;border-color:#fecaca;color:#b91c1c}
+#gvto-root .gvto-muted{font-size:12px;color:var(--muted,#6b7280);margin:8px 0 0}
+
+@media(max-width:520px){
+  #gvto-root .gvto-panel{width:100vw}
+  #gvto-root .gvto-tiles{grid-template-columns:1fr}
+}
