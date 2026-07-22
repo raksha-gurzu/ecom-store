@@ -45,6 +45,10 @@ services:
       ADMIN_TOKEN: ${ADMIN_TOKEN:-merchant_demo_admin_token_def456}
       HMAC_SECRET: ${HMAC_SECRET:-demo_shared_hmac_secret_xyz789}
       GURZU_NOTIFY_URL: ${GURZU_NOTIFY_URL:-http://localhost:8000/v1/integrations/custom-pull/notify}
+      # Storefront try-on panel. No default: unset ⇒ panel not rendered, and the
+      # publishable key stays in the gitignored .env rather than in this file.
+      GURZU_API_BASE: ${GURZU_API_BASE:-}
+      GURZU_PUBLISHABLE_KEY: ${GURZU_PUBLISHABLE_KEY:-}
       # Inside the compose network Postgres is reachable as host `db`.
       DATABASE_URL: postgres://merchant:merchant_pw@db:5432/merchant_catalog
       READONLY_DATABASE_URL: postgres://gurzu_readonly:readonly_pw@db:5432/merchant_catalog
