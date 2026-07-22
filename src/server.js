@@ -43,9 +43,11 @@ app.get("/api-info", async (_req, res) => {
   // EXTERNAL read-only connection string for OUTSIDE consumers (the engine).
   // NOT the app's own READONLY_DATABASE_URL — inside Docker that's `db:5432`,
   // which only resolves on the shop's compose network and is wrong to hand out.
-  // Outside consumers reach the DB via the published host port (5433).
+  // Outside consumers reach the DB via the published host port (5433). The engine
+  // itself runs in its own container, so the default host is the docker bridge
+  // gateway (172.17.0.1) — `localhost` there is the engine container, not the host.
   const dbUrl = process.env.PUBLIC_DB_URL ||
-    "postgres://gurzu_readonly:readonly_pw@localhost:5433/merchant_catalog";
+    "postgres://gurzu_readonly:readonly_pw@172.17.0.1:5433/merchant_catalog";
   res
     .type("html")
     .send(`<!doctype html><meta charset="utf-8">
@@ -82,8 +84,8 @@ SELECT jsonb_agg(product) FROM catalog_json; -- whole catalog
 SELECT * FROM v_variants;                     -- flat rows (real variation_id + stock)</code></pre>
 <p class="muted"><b>Host depends on where you connect from:</b></p>
 <table>
-<tr><th>From your laptop (engine on host)</th><td><code>localhost</code> : <code>5433</code> ← use this</td></tr>
-<tr><th>From a separate Docker container</th><td><code>172.17.0.1</code> or <code>host.docker.internal</code> : <code>5433</code></td></tr>
+<tr><th>From a separate Docker container (the engine)</th><td><code>172.17.0.1</code> : <code>5433</code> ← use this</td></tr>
+<tr><th>From your laptop (psql, pgAdmin desktop)</th><td><code>localhost</code> : <code>5433</code></td></tr>
 <tr><th>Only inside THIS shop's compose net</th><td><code>db</code> : <code>5432</code> (don't hand this out)</td></tr>
 </table>
 <p class="muted">Image paths are relative (<code>/img/…</code>) — prefix with the base URL to download.</p>
