@@ -132,7 +132,10 @@ CREATE OR REPLACE FUNCTION mc_photo(photo text) RETURNS text
         SELECT CASE
             WHEN photo IS NULL THEN NULL
             WHEN photo ~ '^https?://' THEN photo
-            ELSE 'http://localhost:4000' || photo
+            -- 172.17.0.1 (docker bridge gateway), NOT localhost: the engine that
+            -- downloads these images runs in its own container, where localhost
+            -- is that container. Keep in step with PUBLIC_BASE_URL in .env.
+            ELSE 'http://172.17.0.1:4000' || photo
         END
     $fn$;
 
