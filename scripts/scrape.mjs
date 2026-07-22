@@ -27,10 +27,6 @@ const CAP_PER_CATEGORY = 50;
 const MAX_GALLERY = 8;          // images downloaded per product
 const PRODUCT_CONCURRENCY = 6;
 
-// Absolute base for stored image URLs — so DB consumers (the engine's db-pull,
-// which reads raw rows) get directly downloadable links, not relative /img paths.
-const BASE = (process.env.PUBLIC_BASE_URL || "http://localhost:4000").replace(/\/$/, "");
-
 // ── utils ────────────────────────────────────────────────────────────────────
 const hashInt = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; };
 const slugSafe = (s) => String(s).toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -58,18 +54,20 @@ async function mapPool(items, concurrency, fn) {
 }
 
 // Download the gallery; returns ordered local "/img/.." paths (cached on disk).
+// Paths are stored RELATIVE so the host isn't frozen at scrape time — serialize.js
+// and mc_photo() absolutize against PUBLIC_BASE_URL on the way out.
 async function downloadGallery(slug, urls) {
   const paths = [];
   for (let i = 0; i < Math.min(urls.length, MAX_GALLERY); i++) {
     try {
       const existing = ["jpg", "png", "webp"].find((e) =>
         fssync.existsSync(path.join(IMAGES_DIR, `${slug}-${i}.${e}`)));
-      if (existing) { paths.push(`${BASE}/img/${slug}-${i}.${existing}`); continue; }
+      if (existing) { paths.push(`/img/${slug}-${i}.${existing}`); continue; }
       const { buf, type } = await fetchBuffer(urls[i]);
       if (!type.startsWith("image/") || buf.length < 512) continue;
       const file = `${slug}-${i}.${ext(type)}`;
       await fs.writeFile(path.join(IMAGES_DIR, file), buf);
-      paths.push(`${BASE}/img/${file}`);
+      paths.push(`/img/${file}`);
     } catch { /* degrade: skip this image */ }
   }
   return paths;
@@ -223,7 +221,7 @@ async function main() {
     };
 
     if (!brokenAssigned && options.length) {
-      options = [{ ...options[0], photo: `${BASE}/img/__broken__.jpg` }, ...options.slice(1)];
+      options = [{ ...options[0], photo: "/img/__broken__.jpg" }, ...options.slice(1)];
       brokenAssigned = true;
     }
     rows.push({ product, options, images: photos });
