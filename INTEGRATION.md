@@ -48,23 +48,26 @@ query to get clean JSON. It can read, but **can never write** (verified).
 | **User** | `gurzu_readonly` |
 | **Password** | `readonly_pw` |
 
-**Connection string (use this — engine/tools on your machine):**
+**Connection string (use this — the engine runs in its own container):**
 
 ```
-postgres://gurzu_readonly:readonly_pw@localhost:5433/merchant_catalog
+postgres://gurzu_readonly:readonly_pw@172.17.0.1:5433/merchant_catalog
 ```
 
 ⚠️ **The host part depends on where the consumer runs** — this is the #1 gotcha:
 
 | Consumer runs… | Host : Port | |
 |---|---|---|
-| on your laptop (the engine, pgAdmin desktop, psql) | `localhost:5433` | ✅ use this |
-| inside its **own** Docker container | `172.17.0.1:5433` or `host.docker.internal:5433` | host gateway |
+| inside its **own** Docker container (the engine) | `172.17.0.1:5433` | ✅ use this |
+| on your laptop (pgAdmin desktop, psql) | `localhost:5433` | host-native only |
 | inside **this shop's** compose network (app, pgAdmin) | `db:5432` | internal only — **don't hand this out** |
 
-`db` is a private name that only resolves inside the shop's Docker network; an outside
-consumer using it gets `Temporary failure in name resolution`. Always give external
-consumers `localhost:5433` (or the host IP if they're containerized).
+Inside a container `localhost` is that container itself, so a containerized consumer
+given `localhost:5433` gets `[Errno 111] Connection refused`; `172.17.0.1` is the docker
+bridge gateway back to the host. `host.docker.internal` works only if that consumer's
+compose sets `extra_hosts: ["host.docker.internal:host-gateway"]`. And `db` is a private
+name that resolves only inside the shop's own network — an outside consumer using it
+gets `Temporary failure in name resolution`.
 
 ### Clean JSON in one query
 
