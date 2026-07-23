@@ -60,22 +60,37 @@ badStock.length ? fail(`${badStock.length} options have negative stock`) : ok("n
 const dupSku = options.length - new Set(options.map((o) => o.sku)).size;
 dupSku ? fail(`${dupSku} duplicate option skus`) : ok("all option skus unique");
 
-// 5. images on disk — every referenced photo (except the deliberate broken one) must exist & be real
+// 5. images — every referenced photo (except the deliberate broken one) must be
+// URL-SAFE and resolve to a real file THE WAY THE HTTP SERVER SERVES IT. Express
+// URL-decodes the request path before hitting disk, so a stored "/img/x%20Y.jpg"
+// looks on disk for "x Y.jpg" — existence must be checked against the DECODED
+// name, not the raw string (a naive string check passes while consumers get 404).
+// We also flag any path that isn't URL-safe (space/uppercase/%/…) as the upstream
+// cause. product_images (the gallery) is validated here too, not just options.
 const referenced = new Set();
 for (const o of options) if (o.photo) referenced.add(o.photo);
 for (const p of products) if (p.base_photo) referenced.add(p.base_photo);
-let missing = 0, tiny = 0, brokenTrap = 0, nullPhoto = 0;
+const { rows: galleryPhotos } = await pool.query("SELECT photo FROM product_images WHERE photo IS NOT NULL");
+for (const r of galleryPhotos) referenced.add(r.photo);
+
+const URL_SAFE = /^[a-z0-9._/-]+$/; // a served /img path segment: lowercase, digits, . _ - /
+let missing = 0, tiny = 0, brokenTrap = 0, unsafe = 0;
+const missingList = [], unsafeList = [];
 for (const ref of referenced) {
   if (ref.includes("__broken__")) { brokenTrap++; continue; }
   // photos are stored absolute (http://host/img/x) or relative (/img/x) — map to disk
-  const fname = ref.replace(/^https?:\/\/[^/]+/, "").replace(/^\/img\//, "");
-  const file = path.join(IMAGES_DIR, fname);
-  if (!fs.existsSync(file)) { missing++; continue; }
+  const rel = ref.replace(/^https?:\/\/[^/]+/, "").replace(/^\/img\//, "");
+  if (!URL_SAFE.test(rel)) { unsafe++; unsafeList.push(ref); }
+  let decoded = rel; try { decoded = decodeURIComponent(rel); } catch { /* keep raw */ }
+  const file = path.join(IMAGES_DIR, decoded);
+  if (!fs.existsSync(file)) { missing++; missingList.push(ref); continue; }
   if (fs.statSync(file).size < 512) tiny++;
 }
-const optNullPhoto = options.filter((o) => !o.photo).length;
-nullPhoto = optNullPhoto;
-missing ? fail(`${missing} referenced images MISSING from disk`) : ok(`all ${referenced.size} referenced images exist on disk`);
+const nullPhoto = options.filter((o) => !o.photo).length;
+missing ? fail(`${missing} referenced images MISSING from disk (URL-decoded): ${missingList.join(", ")}`)
+  : ok(`all ${referenced.size} referenced images resolve on disk (URL-decoded)`);
+unsafe ? fail(`${unsafe} image paths are NOT URL-safe: ${unsafeList.join(", ")}`)
+  : ok("all image paths are URL-safe (lowercase, no spaces/encoding)");
 tiny ? fail(`${tiny} images are suspiciously small (<512B)`) : ok("no truncated images");
 brokenTrap === 1 ? ok("exactly one broken-image trap present (expected)") : warn(`broken-image traps: ${brokenTrap} (expected 1)`);
 nullPhoto ? warn(`${nullPhoto} options have no photo (degraded download — allowed)`) : ok("every option has a photo");

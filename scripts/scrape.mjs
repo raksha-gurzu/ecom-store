@@ -32,6 +32,18 @@ const hashInt = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++) 
 const slugSafe = (s) => String(s).toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-|-$/g, "");
 const ext = (type) => (type.includes("png") ? "png" : type.includes("webp") ? "webp" : "jpg");
 
+// URL-safe stem for IMAGE FILENAMES. meesa slugs are usually clean
+// lowercase-hyphen, but some arrive percent-encoded / mixed-case (e.g.
+// "kaftan%20Set"). Left raw, the file lands on disk with a literal "%20"/capital
+// and the stored /img path decodes to a different, non-existent name → 404 for
+// that consumer. Decode any %-encoding, lowercase, collapse non-alnum to hyphens.
+// NOTE: the file stem only; sku_group stays the raw meesa slug (the stable id).
+function fileSlug(slug) {
+  let s = String(slug);
+  try { s = decodeURIComponent(s); } catch { /* malformed %-escape: keep raw */ }
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "img";
+}
+
 function quirkFor(i, isSimple) {
   if (i % 17 === 5) return "cents";
   if (i % 17 === 11) return "currency_string";
@@ -57,15 +69,16 @@ async function mapPool(items, concurrency, fn) {
 // Paths are stored RELATIVE so the host isn't frozen at scrape time — serialize.js
 // and mc_photo() absolutize against PUBLIC_BASE_URL on the way out.
 async function downloadGallery(slug, urls) {
+  const stem = fileSlug(slug); // URL-safe filename base, independent of the id
   const paths = [];
   for (let i = 0; i < Math.min(urls.length, MAX_GALLERY); i++) {
     try {
       const existing = ["jpg", "png", "webp"].find((e) =>
-        fssync.existsSync(path.join(IMAGES_DIR, `${slug}-${i}.${e}`)));
-      if (existing) { paths.push(`/img/${slug}-${i}.${existing}`); continue; }
+        fssync.existsSync(path.join(IMAGES_DIR, `${stem}-${i}.${e}`)));
+      if (existing) { paths.push(`/img/${stem}-${i}.${existing}`); continue; }
       const { buf, type } = await fetchBuffer(urls[i]);
       if (!type.startsWith("image/") || buf.length < 512) continue;
-      const file = `${slug}-${i}.${ext(type)}`;
+      const file = `${stem}-${i}.${ext(type)}`;
       await fs.writeFile(path.join(IMAGES_DIR, file), buf);
       paths.push(`/img/${file}`);
     } catch { /* degrade: skip this image */ }
