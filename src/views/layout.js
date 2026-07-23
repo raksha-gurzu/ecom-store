@@ -37,6 +37,7 @@ export function layout({ title, body, depts = [], active = null, q = "" }) {
   return `<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)}</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='13' fill='%23e11d74'/></svg>">
 <link rel="stylesheet" href="/store.css">
 ${tryOn.head}
 </head><body>
