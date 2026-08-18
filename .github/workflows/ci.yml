@@ -1,0 +1,207 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CI — runs on every pull request and every push to `dev`.
+#
+# Three jobs, ordered so the cheap ones fail first:
+#
+#   static      seconds     lint, build, repository structure — no services
+#   contract    ~2 minutes  boots docker-compose.prod.yml, seeds a fixture,
+#                           runs all four suites against it
+#   security    seconds     dependency audit and a secret sweep
+#
+# `contract` deploys the PRODUCTION compose file, not the development one, so
+# what CI proves is the artifact DevOps actually hosts.
+#
+# The stricter gate for `main` lives in main.yml and reuses these same jobs.
+# ─────────────────────────────────────────────────────────────────────────────
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev]
+  workflow_call:        # main.yml calls this workflow
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes the previous run on the same branch.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static:
+    name: Lint, build and structure
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build the storefront
+        run: npm run build
+
+      - name: Repository structure and documentation
+        run: npm run check:repo
+
+      - name: HTML sanitiser unit tests
+        # Security code, and it needs no database or server — so it runs in the
+        # fast job where a failure is reported in seconds.
+        run: npm run test:sanitize
+
+      - name: Generated files must not be committed
+        # check:repo asserts this too; repeated here so the failure message is
+        # unambiguous when someone commits a build artifact.
+        run: |
+          if git ls-files --error-unmatch dist public/bundle.js 2>/dev/null; then
+            echo "::error::build output is tracked in git — remove it and rely on the build"
+            exit 1
+          fi
+          echo "no build output tracked"
+
+  contract:
+    name: Contract suites on the production stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_FILE: docker-compose.prod.yml
+      READ_TOKEN: ci_read_token_not_a_secret
+      ADMIN_TOKEN: ci_admin_token_not_a_secret
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Write the CI environment file
+        run: |
+          cat > .env <<EOF
+          PUBLIC_BASE_URL=http://localhost:4000
+          READ_TOKEN=${READ_TOKEN}
+          ADMIN_TOKEN=${ADMIN_TOKEN}
+          POSTGRES_USER=merchant
+          POSTGRES_PASSWORD=ci_db_password
+          READONLY_DB_PASSWORD=ci_readonly_password
+          APP_BIND=127.0.0.1
+          APP_PORT=4000
+          PUBLIC_DB_URL=
+          GURZU_NOTIFY_URL=
+          HMAC_SECRET=ci_hmac_secret
+          EOF
+
+      - name: Validate the compose file
+        run: docker compose config --quiet
+
+      - name: Build and start the stack
+        run: docker compose up -d --build
+
+      - name: Wait for the app to report healthy
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:4000/health > /dev/null 2>&1; then
+              echo "app is up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::app never became healthy"; docker compose logs; exit 1
+
+      - name: Seed the fixture catalog
+        run: |
+          docker compose exec -T db \
+            psql -v ON_ERROR_STOP=1 -U merchant -d merchant_catalog < db/ci-seed.sql
+
+      - name: Generate the fixture image files
+        # Real PNGs, not padding: audit.mjs sniffs magic bytes and rejects any
+        # file whose contents are not a decodable image matching its extension.
+        run: |
+          node scripts/ci-fixture-images.mjs ci-images
+          docker compose cp ci-images/. app:/app/images/
+
+      - name: Contract check (smoke)
+        run: docker compose exec -T app node scripts/smoke.mjs
+
+      - name: Data integrity (audit)
+        run: docker compose exec -T app node scripts/audit.mjs
+
+      - name: Live endpoints, auth and CRUD
+        env:
+          BASE: http://localhost:4000
+        run: |
+          DB_CONTAINER=$(docker compose ps -q db | xargs docker inspect -f '{{.Name}}' | sed 's|^/||')
+          export DB_CONTAINER
+          bash scripts/test-endpoints.sh
+
+      - name: Integration-path parity and image invariants
+        env:
+          BASE: http://localhost:4000
+        run: docker compose exec -T app node scripts/test-parity.mjs
+
+      - name: Storefront, hydration, errors and stored XSS
+        env:
+          BASE: http://localhost:4000
+        run: node scripts/test-storefront.mjs
+
+      - name: Confirm the database is not publicly reachable
+        # The production compose deliberately publishes no Postgres port. If a
+        # future edit adds one back, this fails and someone has to justify it.
+        run: |
+          if nc -z -w 3 localhost 5432 || nc -z -w 3 localhost 5433; then
+            echo "::error::Postgres is reachable from the host — it must stay internal"
+            exit 1
+          fi
+          echo "Postgres is not published to the host"
+
+      - name: Container logs (on failure)
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  security:
+    name: Dependencies and secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Known vulnerabilities in production dependencies
+        # Only production dependencies gate the build: a advisory in a build-time
+        # tool does not ship to users, and failing on it teaches people to ignore
+        # this job. Development findings are reported, not enforced.
+        run: |
+          npm audit --omit=dev --audit-level=high
+          npm audit || echo "::warning::advisories exist in development dependencies (not blocking)"
+
+      - name: No credentials committed
+        run: |
+          if git ls-files | grep -qx '.env'; then
+            echo "::error::.env is tracked in git"; exit 1
+          fi
+          if git grep -nIE '(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|sk-[a-zA-Z0-9]{32,})' \
+               -- ':!*.md' ':!package-lock.json' > /tmp/secrets.txt; then
+            echo "::error::possible credential committed:"; cat /tmp/secrets.txt; exit 1
+          fi
+          echo "no credential patterns found"

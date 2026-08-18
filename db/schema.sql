@@ -132,10 +132,10 @@ CREATE OR REPLACE FUNCTION mc_photo(photo text) RETURNS text
         SELECT CASE
             WHEN photo IS NULL THEN NULL
             WHEN photo ~ '^https?://' THEN photo
-            -- 172.17.0.1 (docker bridge gateway), NOT localhost: the engine that
-            -- downloads these images runs in its own container, where localhost
-            -- is that container. Keep in step with PUBLIC_BASE_URL in .env.
-            ELSE 'http://172.17.0.1:4000' || photo
+            -- Keep in step with PUBLIC_BASE_URL in .env. If the consumer runs in
+            -- its OWN container, localhost there is that container — swap this
+            -- (and PUBLIC_BASE_URL) for http://172.17.0.1:4000, the bridge gateway.
+            ELSE 'http://localhost:4000' || photo
         END
     $fn$;
 
@@ -200,9 +200,22 @@ SELECT
                         jsonb_build_object('sku', o.sku)
                      || mc_price(o.amount, o.currency, pg.serialize_quirk)
                      || mc_stock(o.stock, pg.serialize_quirk)
-                     || jsonb_build_object('photo', mc_photo(o.photo))
+                        -- broken_photo quirk: the FIRST option gets the dead URL,
+                        -- mirroring serialize.js. Injected here only — options.photo
+                        -- itself stays valid. Matched on the single first sku by
+                        -- (position, sku), NOT on MIN(position): two options can
+                        -- share a position, and that would break BOTH here while
+                        -- serialize.js breaks only one.
+                     || jsonb_build_object('photo', CASE
+                            WHEN pg.serialize_quirk = 'broken_photo'
+                             AND o.sku = (SELECT o2.sku FROM options o2
+                                           WHERE o2.sku_group = pg.sku_group
+                                           ORDER BY o2.position, o2.sku LIMIT 1)
+                            THEN mc_photo('/img/__broken__.jpg')
+                            ELSE mc_photo(o.photo) END)
                      || mc_axes(o.size, o.colour, pg.serialize_quirk)
-                        ORDER BY o.position)
+                        -- same tiebreak as catalog.js / product-repo.js
+                        ORDER BY o.position, o.sku)
                     FROM options o WHERE o.sku_group = pg.sku_group), '[]'::jsonb))
            END
     ) AS product

@@ -41,6 +41,9 @@ services:
     environment:
       PORT: 4000
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:4000}
+      # External read-only DB string shown on /api-info (NOT the app's own
+      # READONLY_DATABASE_URL — inside the container that's the private db:5432).
+      PUBLIC_DB_URL: ${PUBLIC_DB_URL:-postgres://gurzu_readonly:readonly_pw@localhost:5433/merchant_catalog}
       READ_TOKEN: ${READ_TOKEN:-merchant_demo_readonly_token_abc123}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-merchant_demo_admin_token_def456}
       HMAC_SECRET: ${HMAC_SECRET:-demo_shared_hmac_secret_xyz789}
