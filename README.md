@@ -15,6 +15,20 @@ from [meesa.shop](https://meesa.shop)):
 > the awkward "trap" shapes) **and Phase 2** (HMAC-signed change notifications
 > emitted from the management endpoints, with a mock receiver to test against).
 
+**Stack:** Node 20 · Express · PostgreSQL 16 (plain SQL, no ORM) · React rendered
+on the server and hydrated · Docker Compose. Five runtime dependencies (express, pg, dotenv, react, react-dom).
+
+### Where to go next
+
+| You are… | Read |
+|---|---|
+| new here, want to run it | this page, [Quick start](#quick-start) |
+| looking for a specific document | [`docs/README.md`](./docs/README.md) — the index |
+| about to change something | [`docs/explanation/principles.md`](./docs/explanation/principles.md) — what you may and may not touch |
+| hosting this | [`DEPLOY.md`](./DEPLOY.md) |
+| connecting a consumer to it | [`INTEGRATION.md`](./INTEGRATION.md) |
+| an AI agent working in this repo | [`CLAUDE.md`](./CLAUDE.md) |
+
 ---
 
 ## What this is (and isn't)
@@ -47,8 +61,13 @@ meesa.shop ──scrape──▶ Postgres ──┬─ serialize ─▶ GET /api
   from `/variation_stock`, assigns each colour a lead image, seeds the coercion
   traps, and upserts idempotently.
 - **`src/serialize.js`** — renders DB rows into the merchant's wire shape (where
-  `serialize_quirk` injects each trap). **`src/routes/store.js` + `src/views/*`** —
-  the human storefront. The two never mix: the storefront never reshapes the API.
+  `serialize_quirk` injects each trap). **`src/routes/store.js`**, **`src/ui/`**
+  (React components) and **`src/views/`** (server rendering) — the human storefront.
+  The two never mix: the storefront never reshapes the API.
+
+For how a request actually flows through these, see
+[`docs/explanation/architecture.md`](./docs/explanation/architecture.md); for a
+file-by-file map, [`docs/reference/repository-map.md`](./docs/reference/repository-map.md).
 
 ## Quick start
 
@@ -78,22 +97,51 @@ Day to day it's just `docker compose up -d` (data persists in a volume).
 ```bash
 docker compose up -d db        # just Postgres on :5433
 npm install
+npm run build                  # REQUIRED: compiles the React storefront
 npm run scrape                 # populate DB + images/
 npm start                      # app on host :4000
 ```
 
+The build step is not optional on the host — the server renders from `dist/ui.js`
+and will not start without it. The Docker image builds it for you. While working
+on the UI, run `npm run build:watch`.
+
 ### Verify
 
 ```bash
-npm run smoke                  # §9 contract (17 checks)
+npm run verify                 # everything below, in order — this is what CI runs
+```
+
+Or individually:
+
+```bash
+npm run lint                   # ESLint (no running services needed)
+npm run build                  # compile the storefront
+npm run check:repo             # structure, git hygiene, documentation freshness
+npm run test:sanitize          # HTML sanitiser unit tests (34 checks, no services needed)
+npm run smoke                  # §9 API contract (17 checks)
 npm run audit                  # deep data-integrity audit (0 problems)
-npm run test:endpoints         # live auth/storefront/CRUD/role battery (21 checks)
+npm run test:endpoints         # live auth/storefront/CRUD/role battery (26 checks)
+npm run test:storefront        # rendering, hydration, escaping, errors, auth, XSS, traps (56 checks)
 npm run db:pull-example        # prove the direct-DB connection-string path
 ```
 
-The full battery — audit + Phase 1 (`smoke`) + Phase 2 (`phase2`) + `test:endpoints` —
-is **59+ checks** against the real scraped data. `test:endpoints` targets `BASE`
-(default `localhost:4000`).
+That is **133 assertions** against the real scraped data, plus 9 more from
+`npm run phase2` (change notifications, see below). `test:endpoints` and
+`test:storefront` target `BASE` (default `localhost:4000`).
+
+Details and failure diagnosis: [`docs/how-to/run-the-checks.md`](./docs/how-to/run-the-checks.md).
+
+### Git hooks
+
+```bash
+npm run hooks:install          # once per clone
+```
+
+**pre-commit** runs the fast checks (secrets, build, lint, structure) and adds
+work-in-progress and conflict-marker checks on `main` and `dev`. **pre-push** runs
+the full suite, but only when pushing to `main` or `dev` — feature branches push
+freely and are covered by CI. Bypass either with `--no-verify` when you mean to.
 
 ## The storefront (human view)
 
@@ -107,8 +155,11 @@ Open **http://localhost:4000/** in a browser:
   photo and updates the **real** price/stock; sizes unavailable for a colour disable.
 - `/browse` 301-redirects here; the machine-facing API reference moved to **`/api-info`**.
 
-It's server-rendered (no build step), reads through the read-only role, and is purely
-additive — it never changes the API contract below.
+It's **React, server-rendered and hydrated**: each page arrives as finished HTML and
+the bundle then makes the gallery and variant selector interactive, so the storefront
+works with JavaScript disabled. Run `npm run build` before `npm start` (the Docker
+image builds it for you). It reads through the read-only role and is purely additive —
+it never changes the API contract below.
 
 ## Endpoints
 
@@ -180,9 +231,18 @@ constant-time signature verify, classifies the embedding effect, records events)
 
 ```bash
 npm run notify:receiver     # listens on :8099 (NOTIFY_PORT)
-npm start                   # app, with GURZU_NOTIFY_URL → the receiver
+
+# Point the app at that receiver. Its default targets the real engine, and inside
+# a container "localhost" is the container itself — so use the docker bridge:
+GURZU_NOTIFY_URL=http://172.17.0.1:8099/v1/integrations/custom-pull/notify \
+  docker compose up -d --force-recreate app
+
 npm run phase2              # drives create/update/delete, asserts signed events + rejects a forgery
 ```
+
+Expect **9 passed, 0 failed**. If events never arrive, check the app's logs: a
+notification failure is logged with the reason and the URL it tried, and is
+almost always a `GURZU_NOTIFY_URL` pointing somewhere the container cannot reach.
 
 ## Re-scraping / resetting
 
@@ -209,14 +269,49 @@ documented in **[`INTEGRATION.md`](./INTEGRATION.md)** and shown at `/api-info`:
 > - The engine must run in **development** mode to reach `localhost` (its SSRF guard blocks
 >   private IPs in production).
 > - **Use host `localhost:5433`, never `db:5432`.** `db` only resolves inside *our* compose
->   network; an outside consumer using it gets `Temporary failure in name resolution`. An
->   engine in its own container uses `172.17.0.1:5433` / `host.docker.internal:5433`.
+>   network; an outside consumer using it gets `Temporary failure in name resolution`. Only
+>   an engine in its **own** container needs `172.17.0.1:5433` / `host.docker.internal:5433`
+>   — and then `PUBLIC_BASE_URL` + `mc_photo()` must be switched to that host too.
 > - Phase-2 change-notifications aren't built engine-side yet (only Phase-1 pull/sync).
 
 The same DB string also works with any tool: `npm run db:pull-example`, pgAdmin (:5050), `psql`.
 
 ## Configuration
 
-See `.env.example`. Key vars: `READ_TOKEN`, `ADMIN_TOKEN`, `PUBLIC_BASE_URL`,
-`DATABASE_URL` / `READONLY_DATABASE_URL`, and the Phase-2 `HMAC_SECRET` /
-`GURZU_NOTIFY_URL`.
+See `.env.example` for development. Key vars: `READ_TOKEN`, `ADMIN_TOKEN`,
+`PUBLIC_BASE_URL`, `DATABASE_URL` / `READONLY_DATABASE_URL`, and the Phase-2
+`HMAC_SECRET` / `GURZU_NOTIFY_URL`.
+
+For production the file is `.env.prod.example`, which has no working defaults —
+the stack refuses to start until every secret is set.
+
+## Deploying
+
+`docker-compose.yml` is for laptops: it publishes the database, ships pgAdmin, and
+has working default passwords. **Do not deploy it.**
+
+`docker-compose.prod.yml` is the deployable stack — no database port, no default
+secrets, named volumes, health checks, and the app runs as an unprivileged user
+inside the container. Full hand-off notes, including how to load
+the catalog snapshot, are in **[`DEPLOY.md`](./DEPLOY.md)**.
+
+```bash
+cp .env.prod.example .env       # fill in every CHANGE-ME
+docker compose -f docker-compose.prod.yml up -d --build
+./scripts/restore-seed.sh /path/to/snapshot
+```
+
+Data reaches production as a **snapshot** (`scripts/export-seed.sh` produces it,
+`scripts/restore-seed.sh` loads it), never by scraping during a deploy — see
+[principle 8](./docs/explanation/principles.md).
+
+## Continuous integration
+
+| Workflow | Runs on | Does |
+|---|---|---|
+| `.github/workflows/ci.yml` | pull requests, `dev` | lint + build + structure, then boots `docker-compose.prod.yml`, seeds a fixture and runs all four suites, then a dependency and secret sweep |
+| `.github/workflows/main.yml` | `main` | all of the above, plus a deployability gate: the stack must start from `.env.prod.example` alone, must refuse to start without secrets, and the snapshot export/restore path must work end to end |
+
+CI exercises the **production** compose file, not the development one, so what it
+proves is the artifact that actually gets hosted. Neither workflow deploys by
+itself; `main` proves deployability and optionally publishes an image.

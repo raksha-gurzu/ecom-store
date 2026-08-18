@@ -1,8 +1,13 @@
 // Phase-2 end-to-end demo + check.
 //
 // Prereqs (the script tells you if they're missing):
-//   • app running on :4000 with GURZU_NOTIFY_URL pointing at the mock receiver
-//   • mock receiver running:  npm run notify:receiver
+//   • mock receiver running:  npm run notify:receiver          (host :8099)
+//   • app running on :4000 with GURZU_NOTIFY_URL pointing AT THAT RECEIVER —
+//     the app's default points at the real engine, not the stand-in. From a
+//     container the host is the docker bridge, not localhost:
+//       docker compose up -d   # then, to re-point the running app:
+//       GURZU_NOTIFY_URL=http://172.17.0.1:8099/v1/integrations/custom-pull/notify \
+//         docker compose up -d --force-recreate app
 //
 // It drives create → update(content) → update(price) → delete through the manage
 // endpoints, then asserts the receiver got 4 signed events with the right
@@ -10,7 +15,7 @@
 import "dotenv/config";
 
 const APP = (process.env.PUBLIC_BASE_URL || "http://localhost:4000").replace(/\/$/, "");
-const RECEIVER = (process.env.GURZU_NOTIFY_URL || "http://localhost:8000/v1/integrations/custom-pull/notify")
+const RECEIVER = (process.env.NOTIFY_RECEIVER_URL || "http://localhost:8099/v1/integrations/custom-pull/notify")
   .replace(/\/v1\/.*$/, "");
 const ADMIN = process.env.ADMIN_TOKEN || "merchant_demo_admin_token_def456";
 
@@ -26,7 +31,7 @@ async function jt(method, path, body, base = APP, headers = admin) {
   const res = await fetch(`${base}${path}`, {
     method, headers, body: body ? JSON.stringify(body) : undefined,
   });
-  let json = null; try { json = await res.json(); } catch {}
+  let json = null; try { json = await res.json(); } catch { /* non-JSON body is fine here */ }
   return { status: res.status, json };
 }
 

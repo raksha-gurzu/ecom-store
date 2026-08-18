@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { pool } from "../src/db.js";
+import { sniffImage, isUsable } from "./lib/imagetype.mjs";
 
 const IMAGES_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "images");
 
@@ -74,10 +75,10 @@ const { rows: galleryPhotos } = await pool.query("SELECT photo FROM product_imag
 for (const r of galleryPhotos) referenced.add(r.photo);
 
 const URL_SAFE = /^[a-z0-9._/-]+$/; // a served /img path segment: lowercase, digits, . _ - /
-let missing = 0, tiny = 0, brokenTrap = 0, unsafe = 0;
-const missingList = [], unsafeList = [];
+let missing = 0, tiny = 0, unsafe = 0, mistyped = 0, unreadable = 0;
+const missingList = [], unsafeList = [], mistypedList = [];
 for (const ref of referenced) {
-  if (ref.includes("__broken__")) { brokenTrap++; continue; }
+  if (ref.includes("__broken__")) { fail(`broken-image URL stored in the DB: ${ref} (the trap belongs in serialization)`); continue; }
   // photos are stored absolute (http://host/img/x) or relative (/img/x) — map to disk
   const rel = ref.replace(/^https?:\/\/[^/]+/, "").replace(/^\/img\//, "");
   if (!URL_SAFE.test(rel)) { unsafe++; unsafeList.push(ref); }
@@ -85,6 +86,14 @@ for (const ref of referenced) {
   const file = path.join(IMAGES_DIR, decoded);
   if (!fs.existsSync(file)) { missing++; missingList.push(ref); continue; }
   if (fs.statSync(file).size < 512) tiny++;
+  // The bytes must actually BE the format the filename claims. meesa serves some
+  // AVIF under Content-Type: image/jpeg; a mislabelled file is served with the
+  // wrong Content-Type and fails in any strict decoder (the connector, PIL).
+  const kind = sniffImage(fs.readFileSync(file));
+  if (!isUsable(kind)) { unreadable++; mistypedList.push(`${ref} (not a usable image)`); }
+  else if (kind !== path.extname(decoded).slice(1).toLowerCase()) {
+    mistyped++; mistypedList.push(`${ref} (is ${kind})`);
+  }
 }
 const nullPhoto = options.filter((o) => !o.photo).length;
 missing ? fail(`${missing} referenced images MISSING from disk (URL-decoded): ${missingList.join(", ")}`)
@@ -92,8 +101,16 @@ missing ? fail(`${missing} referenced images MISSING from disk (URL-decoded): ${
 unsafe ? fail(`${unsafe} image paths are NOT URL-safe: ${unsafeList.join(", ")}`)
   : ok("all image paths are URL-safe (lowercase, no spaces/encoding)");
 tiny ? fail(`${tiny} images are suspiciously small (<512B)`) : ok("no truncated images");
-brokenTrap === 1 ? ok("exactly one broken-image trap present (expected)") : warn(`broken-image traps: ${brokenTrap} (expected 1)`);
+(mistyped + unreadable)
+  ? fail(`${mistyped + unreadable} images are undecodable or misnamed: ${mistypedList.slice(0, 10).join(", ")}`)
+  : ok("every image on disk decodes and matches its extension");
 nullPhoto ? warn(`${nullPhoto} options have no photo (degraded download — allowed)`) : ok("every option has a photo");
+
+// 5b. the broken-image trap now lives in serialization (serialize_quirk), so the
+// storefront never renders a dead thumbnail while the API still ships one.
+const brokenTrap = products.filter((p) => p.serialize_quirk === "broken_photo").length;
+brokenTrap === 1 ? ok("exactly one broken-image trap (serialized, not stored)")
+  : warn(`broken-image traps: ${brokenTrap} (expected 1)`);
 
 // 6. trap coverage in DB
 const quirks = {};
@@ -109,8 +126,11 @@ const { rows: imgRows } = await pool.query("SELECT sku_group, COUNT(*)::int n FR
 const galleryByGroup = new Map(imgRows.map((r) => [r.sku_group, r.n]));
 const withGallery = products.filter((p) => (galleryByGroup.get(p.sku_group) || 0) >= 1).length;
 const multiImage = products.filter((p) => (galleryByGroup.get(p.sku_group) || 0) >= 2).length;
+// Hard failure, not a warning: a product with no image must never reach the store
+// — the scraper drops those instead of inserting them.
 withGallery === products.length ? ok(`every product has a gallery (${imgRows.reduce((a, r) => a + r.n, 0)} images total)`)
-  : warn(`${products.length - withGallery} products have no gallery images`);
+  : fail(`${products.length - withGallery} products have NO gallery images: ` +
+      products.filter((p) => !(galleryByGroup.get(p.sku_group) || 0)).map((p) => p.sku_group).slice(0, 10).join(", "));
 multiImage > 0 ? ok(`${multiImage} products have a multi-image gallery (≥2)`) : warn("no multi-image galleries");
 
 const realVar = options.filter((o) => o.variation_id).length;

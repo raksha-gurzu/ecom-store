@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Pre-push hook — the last gate before code leaves the machine.
+#
+# Installed by:  npm run hooks:install
+#
+# Pushing to main or dev runs the full suite against a live stack, because those
+# branches are what CI and deployment build from. Feature branches push freely —
+# CI will check them, and blocking every push would just teach people to use
+# --no-verify.
+#
+# Bypass deliberately with:  git push --no-verify
+set -uo pipefail
+
+PROTECTED_RE='^(main|dev)$'
+remote_ref_ok=0
+
+say()  { printf '\033[1m%s\033[0m\n' "$*"; }
+pass() { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+bad()  { printf '  \033[31m✗\033[0m %s\n' "$*"; }
+
+# git feeds "<local ref> <local sha> <remote ref> <remote sha>" on stdin.
+protected=""
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  branch="${remote_ref#refs/heads/}"
+  [[ "$branch" =~ $PROTECTED_RE ]] && protected="$branch"
+  remote_ref_ok=1
+done
+
+if [ "$remote_ref_ok" -eq 0 ] || [ -z "$protected" ]; then
+  exit 0   # not a protected branch — CI covers it
+fi
+
+say "pre-push  (protected branch: $protected)"
+
+if ! curl -fsS http://localhost:4000/health >/dev/null 2>&1; then
+  bad "no app running on :4000 — the full suite needs one"
+  echo "      start it with:  docker compose up -d"
+  echo "      or skip this gate with:  git push --no-verify"
+  exit 1
+fi
+pass "app is running"
+
+failed=0
+run() {
+  local name="$1"; shift
+  if "$@" >/tmp/prepush.$$ 2>&1; then
+    pass "$name"
+  else
+    bad "$name"
+    tail -15 /tmp/prepush.$$ | sed 's/^/      /'
+    failed=1
+  fi
+  rm -f /tmp/prepush.$$
+}
+
+run "lint"                 npm run --silent lint
+run "build"                npm run --silent build
+run "repository structure"  node scripts/check-repo.mjs
+run "HTML sanitiser"        node scripts/test-sanitize.mjs
+run "API contract (smoke)"  npm run --silent smoke
+run "data integrity (audit)" npm run --silent audit
+run "endpoints and auth"    npm run --silent test:endpoints
+run "storefront and security" npm run --silent test:storefront
+
+echo
+if [ "$failed" -ne 0 ]; then
+  printf '\033[31mpre-push failed.\033[0m %s is a protected branch — fix the above first.\n' "$protected"
+  printf 'Bypass deliberately with: git push --no-verify\n'
+  exit 1
+fi
+printf '\033[32mpre-push passed.\033[0m Safe to push to %s.\n' "$protected"
+exit 0

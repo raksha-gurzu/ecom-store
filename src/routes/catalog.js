@@ -34,7 +34,7 @@ router.get("/catalog", async (req, res, next) => {
 
     // Their options in one query, grouped in JS.
     const ids = products.map((p) => p.sku_group);
-    let optionsByGroup = new Map();
+    const optionsByGroup = new Map();
     if (ids.length) {
       const { rows: opts } = await readPool.query(
         `SELECT * FROM options WHERE sku_group = ANY($1)

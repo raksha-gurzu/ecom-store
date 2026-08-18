@@ -21,7 +21,7 @@ const ENTITIES = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;
 export function decodeEntities(s) {
   return String(s ?? "")
     .replace(/&(amp|lt|gt|quot|#39|nbsp);/g, (m) => ENTITIES[m])
-    .replace(/ /g, " ");
+    .replace(/\u00a0/g, " ");   // NBSP → plain space (invisible if written literally)
 }
 // collapse whitespace, trim; good for titles/brands/option values
 export const cleanText = (s) => decodeEntities(s).replace(/\s+/g, " ").trim();
@@ -78,7 +78,7 @@ export async function categoryPageSlugs(category, page) {
   const headers = page > 1 ? { Accept: "text/vnd.turbo-stream.html" } : {};
   const html = await fetchText(url, { headers });
   const slugs = new Set();
-  for (const m of html.matchAll(/href="\/products\/([^"\/?#]+)"/g)) slugs.add(m[1]);
+  for (const m of html.matchAll(/href="\/products\/([^"/?#]+)"/g)) slugs.add(m[1]);
   return [...slugs];
 }
 

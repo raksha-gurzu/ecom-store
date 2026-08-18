@@ -34,7 +34,12 @@ export async function notify(event) {
     return { ok: res.ok, status: res.status };
   } catch (err) {
     // Engine unreachable is expected in dev — don't spam, just note once per call.
-    console.warn(`[notify] ${event.type} -> not delivered (${err.name || err.message})`);
+    // Include the URL and the underlying cause: Node's fetch reports every
+    // network failure as a bare "TypeError", so the name alone cannot tell
+    // "wrong host" from "nothing listening" and sends you hunting for a bug
+    // that is really a misconfigured GURZU_NOTIFY_URL.
+    const cause = err.cause?.code || err.cause?.message || err.message || err.name;
+    console.warn(`[notify] ${event.type} -> not delivered: ${cause} (${url})`);
     return { ok: false, error: String(err.message || err) };
   }
 }

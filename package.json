@@ -8,20 +8,39 @@
     "node": ">=20"
   },
   "scripts": {
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "check:repo": "node scripts/check-repo.mjs",
+    "test:sanitize": "node scripts/test-sanitize.mjs",
+    "hooks:install": "git config core.hooksPath .githooks && echo \"git hooks installed (.githooks)\"",
+    "verify": "npm run lint && npm run build && npm run check:repo && npm run test:sanitize && npm run smoke && npm run audit && npm run test:endpoints && npm run test:storefront && npm run test:parity",
+    "build": "node scripts/build.mjs",
+    "build:watch": "node scripts/build.mjs --watch",
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js",
+    "dev": "node scripts/build.mjs && node --watch src/server.js",
     "scrape": "node scripts/scrape.mjs",
     "db:init": "node scripts/db-init.mjs",
     "smoke": "node scripts/smoke.mjs",
     "audit": "node scripts/audit.mjs",
     "db:pull-example": "node scripts/db-pull-example.mjs",
     "test:endpoints": "bash scripts/test-endpoints.sh",
+    "test:storefront": "node scripts/test-storefront.mjs",
+    "test:parity": "node scripts/test-parity.mjs",
     "notify:receiver": "node scripts/mock-notify-receiver.mjs",
     "phase2": "node scripts/phase2-demo.mjs"
   },
   "dependencies": {
     "dotenv": "16.4.5",
-    "express": "4.19.2",
-    "pg": "8.12.0"
+    "express": "4.22.2",
+    "pg": "8.12.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "esbuild": "^0.25.12",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "globals": "^17.11.0"
   }
 }

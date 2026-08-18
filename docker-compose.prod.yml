@@ -1,0 +1,98 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PRODUCTION stack — the deployable description of this site.
+#
+# This is the file to host. It is the same system as docker-compose.yml (the
+# local dev file) with the laptop-only conveniences removed:
+#
+#   • no pgAdmin            — a local debugging tool, not part of the product
+#   • no published DB port  — Postgres is reachable only inside this network
+#   • no baked-in secrets   — every credential comes from the environment and
+#                             startup FAILS LOUDLY if one is missing
+#   • named volumes         — data survives `docker compose down` and restarts,
+#                             instead of living in the checked-out source tree
+#
+# Usage:
+#   cp .env.prod.example .env      # then fill in real values
+#   docker compose -f docker-compose.prod.yml up -d --build
+#   ./scripts/restore-seed.sh      # load the catalog snapshot (see DEPLOY.md)
+#
+# Full hand-off notes, including what to put in front of this: DEPLOY.md
+# ─────────────────────────────────────────────────────────────────────────────
+name: ecom-store
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # NOT configurable: db/schema.sql grants privileges to this database by
+      # name, so renaming it breaks the read-only role. See DEPLOY.md.
+      POSTGRES_DB: merchant_catalog
+      # Consumed by 20-set-passwords.sh below, not by Postgres itself.
+      READONLY_DB_PASSWORD: ${READONLY_DB_PASSWORD:?set READONLY_DB_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Both run ONCE, on first boot of an empty volume, in filename order:
+      #   01 creates the tables, views and the SELECT-only gurzu_readonly role
+      #   20 replaces that role's shipped dev password with the real one
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./db/prod-init/20-set-passwords.sh:/docker-entrypoint-initdb.d/20-set-passwords.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    # Deliberately no `ports:` — nothing outside this compose network can reach
+    # Postgres. To expose the read-only role to an external consumer, publish it
+    # explicitly and read the security note in DEPLOY.md first.
+
+  app:
+    # Built from the repo by default. To deploy a prebuilt image from a registry
+    # instead, set APP_IMAGE and drop the build step (see DEPLOY.md).
+    image: ${APP_IMAGE:-ecom-store:local}
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: 4000
+      # The public https:// origin this site is served on. Product image URLs in
+      # the API response are built from this, so a wrong value means every image
+      # 404s for consumers. There is no safe default — it must be set.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:?set PUBLIC_BASE_URL in .env}
+      READ_TOKEN: ${READ_TOKEN:?set READ_TOKEN in .env}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?set ADMIN_TOKEN in .env}
+      HMAC_SECRET: ${HMAC_SECRET:-}
+      GURZU_NOTIFY_URL: ${GURZU_NOTIFY_URL:-}
+      # Shown on the /api-info page as the external DB connection string. Leave
+      # blank unless Postgres is actually published to consumers.
+      PUBLIC_DB_URL: ${PUBLIC_DB_URL:-}
+      # Inside this network Postgres is `db:5432`. Writes use the owner role,
+      # catalog reads use the SELECT-only role — keep the split.
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/merchant_catalog
+      READONLY_DATABASE_URL: postgres://gurzu_readonly:${READONLY_DB_PASSWORD}@db:5432/merchant_catalog
+    ports:
+      # Binds to loopback by default: put a reverse proxy (nginx/Traefik/Caddy)
+      # in front for TLS. Set APP_BIND=0.0.0.0 only to expose it directly.
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-4000}:4000"
+    volumes:
+      # ~700MB of product images. This MUST persist: the catalog references
+      # these files by URL, and the app does not regenerate them on boot.
+      - images:/app/images
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  pgdata:
+  images:

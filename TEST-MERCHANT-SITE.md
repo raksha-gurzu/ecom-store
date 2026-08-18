@@ -5,14 +5,16 @@ This document describes the *merchant-side* e-commerce site you will build (in a
 project folder) so that, once the connector exists, we have a realistic target to test it
 against. Build the site to this contract and the two halves will connect.
 
-**Companion specs:** `docs/superpowers/specs/2026-06-15-custom-catalog-push-design.md`
+**Companion specs** — these live in the **GurzuVTO engine repository**, not here.
+Paths below are relative to that repo: docs/superpowers/specs/2026-06-15-custom-catalog-push-design.md
 (the *push* sibling), the Shopify/WooCommerce specs (the *platform-pull* siblings),
-`docs/plan-visual/custom-pull-integration.html` (the visual walkthrough), and
+docs/plan-visual/custom-pull-integration.html (the visual walkthrough), and its
 `CLAUDE.md` → integrations sections.
 
-> **Process note:** this connector reopens two non-goals the `2026-06-15` push spec locked
+> **Process note:** this connector reopens two non-goals the 2026-06-15 push spec locked
 > (pulling from merchant endpoints; AI field-mapping). Before implementation, write
-> `docs/decisions/0009-custom-pull-ingress.md` to consciously supersede them, listing the
+> docs/decisions/0009-custom-pull-ingress.md **in the engine repository** to consciously
+> supersede them, listing the
 > safeguards that make them acceptable now (AI proposes-only, deterministic locked replay,
 > operator confirm, SSRF hardening).
 

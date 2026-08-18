@@ -7,12 +7,15 @@
 //   • classifies the embedding effect (content change → re-embed; price/qty → not),
 //   • records the event so a test can assert what arrived (GET /_events).
 //
-// Run:  npm run notify:receiver   (listens on :8000, path /v1/integrations/custom-pull/notify)
+// Run:  npm run notify:receiver   (listens on :8099, path /v1/integrations/custom-pull/notify)
+//
+// Port 8099, not 8000: the real GurzuVTO engine listens on 8000 in development,
+// so defaulting there makes the stand-in fail to bind whenever the engine is up.
 import "dotenv/config";
 import http from "node:http";
 import crypto from "node:crypto";
 
-const PORT = parseInt(process.env.NOTIFY_PORT || "8000", 10);
+const PORT = parseInt(process.env.NOTIFY_PORT || "8099", 10);
 const SECRET = process.env.HMAC_SECRET || "demo_shared_hmac_secret_xyz789";
 const PATH = "/v1/integrations/custom-pull/notify";
 
@@ -52,7 +55,7 @@ const server = http.createServer((req, res) => {
     return res.end(JSON.stringify({ error: "not_found" }));
   }
 
-  let chunks = [];
+  const chunks = [];
   req.on("data", (c) => chunks.push(c));
   req.on("end", () => {
     const raw = Buffer.concat(chunks).toString("utf8");
