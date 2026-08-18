@@ -140,47 +140,6 @@ pre-registered via `db/pgadmin/servers.json`; password `merchant_pw`, entered on
 - All storefront routes are unauthenticated and read-only; keep them mounted AFTER
   `public`/`/img` static and BEFORE the `/api` token guard.
 
-## Search & Try-On panel (v3, storefront UI)
-
-A slide-over panel that calls the **GurzuVTO REST API** (`GURZU_API_BASE`, default
-`http://localhost:8000`) straight from the browser. This is the one place the store
-*consumes* Gurzu rather than being consumed by it — it is pure UI and touches neither
-the catalog contract nor the DB.
-
-- `public/tryon.css` — all rules prefixed `.gvto-` under `#gvto-root`/`#gvto-launch`, so
-  they can't leak into the store's styles; design tokens are inherited from `store.css`.
-- `public/tryon.js` — search → tray (cap 6) → photo → per-tile render. Vanilla IIFE, same
-  no-build idiom as `store.js`. Builds DOM nodes rather than `innerHTML`.
-- `src/views/layout.js` — `tryOnBlock()` emits the `#gvto-config` JSON island (same
-  handoff pattern as `#pd-data`), the launcher button, and the asset tags. Mounting it
-  in the shared layout is what puts the panel on every storefront page.
-
-Invariants:
-- **Key config, never hardcoded.** `GURZU_PUBLISHABLE_KEY` lives in `.env` (gitignored);
-  `.env.example` and `docker-compose.yml` carry only a placeholder / empty default. If
-  either env var is unset the panel isn't rendered at all — a fresh clone degrades to the
-  plain store instead of throwing 401s.
-- The key is publishable and **origin-locked to `http://localhost:4000`**, so it is safe in
-  page source — but it spends real renders. Revoke it if the store becomes public.
-- **The shopper photo is never persisted** — no localStorage/sessionStorage, object URLs
-  revoked, state dropped on panel close. It goes to the API and nowhere else.
-- **Photo preprocessing is required** before upload: EXIF-rotate via
-  `createImageBitmap(file,{imageOrientation:"from-image"})` (skip it and phone portraits
-  arrive sideways), downscale to ≤1536px longest edge, re-encode JPEG ~0.9, strip the
-  `data:` prefix. The request body cap is 12 MB and base64 inflates ~4/3.
-- **Only `done` and `failed` are terminal.** Anything else means keep polling — more
-  states may be added. Poll every 2.5s, all jobs concurrently, bounded at ~6 min so a
-  stuck job reads as a failure rather than a hang.
-- **Never swallow an error into a blank tile.** Each status maps to its own wording
-  (401 config · 402 split on `render_cap_exhausted` · 403 split on `origin_not_allowed`
-  vs `missing_scope` · 409 the not-synced message · 422 validation · 429 back off).
-  **429 is the only status that retries.** `detail` arrives in three shapes — `{reason,
-  message}`, a plain string, or FastAPI's validation array (422) — all three are handled.
-
-Gotcha: a 409 on the first search is not a bug in this panel — it means the store hasn't
-finished **Sync + Generate embeddings** in the Gurzu dashboard (`localhost:5173`, which is
-the dashboard, *not* the API — never send requests there).
-
 ## Integration paths (how the engine connects)
 
 Two read-only ways to get the catalog, both documented in `INTEGRATION.md` and shown

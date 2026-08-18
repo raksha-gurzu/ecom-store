@@ -5,28 +5,8 @@ export const esc = (s) =>
 
 export const rs = (n) => (n == null ? "—" : `Rs. ${Number(n).toLocaleString("en-IN")}`);
 
-// GurzuVTO try-on panel — additive UI, off unless BOTH env vars are set, so a
-// fresh clone with no key renders the plain store instead of failing on 401.
-// The key is publishable + origin-locked (safe in page source); it lives in
-// .env (gitignored), never in .env.example.
-function tryOnBlock() {
-  const apiBase = process.env.GURZU_API_BASE;
-  const publishableKey = process.env.GURZU_PUBLISHABLE_KEY;
-  if (!apiBase || !publishableKey) return { head: "", tail: "" };
-  // JSON island — same handoff pattern as #pd-data. </ is escaped so a stray
-  // "</script>" inside a value can't close the tag early.
-  const cfg = JSON.stringify({ apiBase, publishableKey }).replace(/</g, "\\u003c");
-  return {
-    head: `<link rel="stylesheet" href="/tryon.css">`,
-    tail: `<button id="gvto-launch" type="button" aria-label="Open search and try-on">✨ Search &amp; Try-On</button>
-<script type="application/json" id="gvto-config">${cfg}</script>
-<script src="/tryon.js" defer></script>`,
-  };
-}
-
 // depts: [{dept, n}], active: current dept slug/name or null, q: search string
 export function layout({ title, body, depts = [], active = null, q = "" }) {
-  const tryOn = tryOnBlock();
   const pills = depts
     .map((d) => {
       const on = active && active.toLowerCase() === d.dept.toLowerCase();
@@ -39,7 +19,6 @@ export function layout({ title, body, depts = [], active = null, q = "" }) {
 <title>${esc(title)}</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='13' fill='%23e11d74'/></svg>">
 <link rel="stylesheet" href="/store.css">
-${tryOn.head}
 </head><body>
 <header class="hdr">
   <div class="hdr-top">
@@ -64,6 +43,5 @@ ${tryOn.head}
   <span>Machine API: <a href="/api-info">/api/catalog</a> (token-gated)</span>
 </div></footer>
 <script src="/store.js" defer></script>
-${tryOn.tail}
 </body></html>`;
 }
