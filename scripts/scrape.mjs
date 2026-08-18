@@ -13,15 +13,19 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { pool } from "../src/db.js";
 import {
-  collectCategorySlugs, parseProduct, fetchVariants, fetchBuffer, cleanText, sleep,
+  collectCategorySlugs, parseProduct, fetchVariants, fetchBuffer, cleanText,
 } from "./lib/meesa.mjs";
+import { sniffImage, isUsable, IMAGE_EXTS } from "./lib/imagetype.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const IMAGES_DIR = path.resolve(__dirname, "..", "images");
 
+// Deliberately NO innerwear/bras: this catalog is browsed by humans in demos,
+// so lingerie is out. Their slots are filled by other meesa departments.
 const CATEGORIES = [
-  "clothing", "jewellery", "skincare", "bags", "innerwear", "earrings",
-  "crochet", "dresses", "kurta", "bras", "sun-screen", "tops",
+  "clothing", "jewellery", "skincare", "bags", "footwear", "earrings",
+  "crochet", "dresses", "kurta", "makeup", "sun-screen", "tops",
+  "hair-care", "bodycare", "accessories", "others",
 ];
 const CAP_PER_CATEGORY = 50;
 const MAX_GALLERY = 8;          // images downloaded per product
@@ -30,7 +34,6 @@ const PRODUCT_CONCURRENCY = 6;
 // ── utils ────────────────────────────────────────────────────────────────────
 const hashInt = (s) => { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; };
 const slugSafe = (s) => String(s).toUpperCase().replace(/[^A-Z0-9]+/g, "-").replace(/^-|-$/g, "");
-const ext = (type) => (type.includes("png") ? "png" : type.includes("webp") ? "webp" : "jpg");
 
 // URL-safe stem for IMAGE FILENAMES. meesa slugs are usually clean
 // lowercase-hyphen, but some arrive percent-encoded / mixed-case (e.g.
@@ -68,17 +71,30 @@ async function mapPool(items, concurrency, fn) {
 // Download the gallery; returns ordered local "/img/.." paths (cached on disk).
 // Paths are stored RELATIVE so the host isn't frozen at scrape time — serialize.js
 // and mc_photo() absolutize against PUBLIC_BASE_URL on the way out.
+//
+// The file extension comes from the BYTES, not from the Content-Type header:
+// meesa serves some AVIF images as `image/jpeg`, and a mislabelled file decodes
+// nowhere but the browser. Anything whose bytes aren't a recognisable, usable
+// image is skipped — a product left with none is dropped by the caller.
 async function downloadGallery(slug, urls) {
   const stem = fileSlug(slug); // URL-safe filename base, independent of the id
   const paths = [];
   for (let i = 0; i < Math.min(urls.length, MAX_GALLERY); i++) {
     try {
-      const existing = ["jpg", "png", "webp"].find((e) =>
+      const existing = IMAGE_EXTS.find((e) =>
         fssync.existsSync(path.join(IMAGES_DIR, `${stem}-${i}.${e}`)));
-      if (existing) { paths.push(`/img/${stem}-${i}.${existing}`); continue; }
-      const { buf, type } = await fetchBuffer(urls[i]);
-      if (!type.startsWith("image/") || buf.length < 512) continue;
-      const file = `${stem}-${i}.${ext(type)}`;
+      if (existing) {
+        // Cached — but an earlier run may have written it under a lying extension,
+        // so re-verify the bytes rather than trusting the name.
+        const cached = path.join(IMAGES_DIR, `${stem}-${i}.${existing}`);
+        const real = sniffImage(await fs.readFile(cached));
+        if (real === existing && isUsable(real)) { paths.push(`/img/${stem}-${i}.${existing}`); continue; }
+        await fs.rm(cached, { force: true }); // wrong/undecodable → re-fetch below
+      }
+      const { buf } = await fetchBuffer(urls[i]);
+      const kind = sniffImage(buf);
+      if (!isUsable(kind) || buf.length < 512) continue; // not an image we can serve
+      const file = `${stem}-${i}.${kind}`;
       await fs.writeFile(path.join(IMAGES_DIR, file), buf);
       paths.push(`/img/${file}`);
     } catch { /* degrade: skip this image */ }
@@ -206,12 +222,27 @@ async function main() {
     return { p, photos, options, realVar };
   });
 
+  // 2b. A product whose images didn't scrape is NOT put in the store: a card with
+  //     a dead thumbnail is worse than one product fewer, and the connector would
+  //     ingest it text-only. Dropped here AND deleted from the DB below, so a
+  //     re-scrape retires a product whose images have gone bad upstream.
+  const usable = [], dropped = [];
+  for (const r of processed) {
+    if (!r || r.error) continue;
+    (r.photos.length ? usable : dropped).push(r);
+  }
+  if (dropped.length) {
+    console.log(`[scrape] dropping ${dropped.length} product(s) with no usable image:`);
+    for (const r of dropped) console.log(`[scrape]   - ${r.p.slug}`);
+  }
+
   // 3. assemble rows deterministically (quirks/traps by stable index, no races)
-  let trapStats = {}, simpleCount = 0, realVariantProducts = 0, brokenAssigned = false;
+  const trapStats = {};
+  let simpleCount = 0, realVariantProducts = 0;
   const rows = [];
-  processed.filter((r) => r && !r.error).forEach((r, i) => {
+  usable.forEach((r, i) => {
     const { p, photos } = r;
-    let options = r.options;
+    const options = r.options;
     if (r.realVar) realVariantProducts++;
     const isSimple = options.length === 0;
     if (isSimple) simpleCount++;
@@ -233,10 +264,6 @@ async function main() {
       serialize_quirk: quirk,
     };
 
-    if (!brokenAssigned && options.length) {
-      options = [{ ...options[0], photo: "/img/__broken__.jpg" }, ...options.slice(1)];
-      brokenAssigned = true;
-    }
     rows.push({ product, options, images: photos });
   });
 
@@ -273,11 +300,43 @@ async function main() {
   for (const r of rows) if (hashInt(r.product.sku_group) % 7 === 0) { r.product.brand_name = null; brandDropped++; }
   if (!brandDropped && rows.length) { rows[0].product.brand_name = null; }
 
+  // 4d. the §5 broken-image trap. It lives in SERIALIZATION (a quirk), not in the
+  //     DB: the spec wants the connector to meet one dead image URL, but the
+  //     storefront reads the same rows and must not render a broken thumbnail.
+  //     Applied to a product that carries no other trap, so coverage is unaffected.
+  const brokenVictim = rows.find((r) => r.product.serialize_quirk === "normal" && r.options.length);
+  if (brokenVictim) {
+    brokenVictim.product.serialize_quirk = "broken_photo";
+    trapStats.normal--;
+    trapStats.broken_photo = 1;
+  }
+
   // 5. persist
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     for (const { product, options, images } of rows) await upsertProduct(client, product, options, images);
+    // retire products dropped above (images no longer scrape) — cascades to
+    // options + product_images, so nothing dangles.
+    for (const r of dropped) {
+      await client.query("DELETE FROM product_groups WHERE sku_group = $1", [r.p.slug]);
+    }
+    // Sweep any OTHER imageless product too: rows left by an earlier scrape whose
+    // slug isn't in today's category set never pass through the check above, so
+    // without this they'd sit in the store forever showing a dead thumbnail.
+    //
+    // SCRAPED ROWS ONLY (`source_url IS NOT NULL`). Products created through
+    // /manage carry no source_url and no product_images row, so an unscoped sweep
+    // would silently delete the admin's own catalog entries on the next scrape.
+    const { rows: swept } = await client.query(
+      `DELETE FROM product_groups pg
+        WHERE pg.source_url IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM product_images i WHERE i.sku_group = pg.sku_group)
+        RETURNING sku_group`
+    );
+    if (swept.length) {
+      console.log(`[scrape] swept ${swept.length} stale imageless product(s): ${swept.map((r) => r.sku_group).join(", ")}`);
+    }
     await client.query("COMMIT");
   } catch (err) { await client.query("ROLLBACK"); throw err; } finally { client.release(); }
 
@@ -289,7 +348,8 @@ async function main() {
   console.log(`  gallery images:           ${totalImages}`);
   console.log(`  simple (no-variant):      ${simpleCount}`);
   console.log(`  serialize quirks:         ${JSON.stringify(trapStats)}`);
-  console.log(`  broken-image trap:        ${brokenAssigned ? "1 option" : "none"}`);
+  console.log(`  dropped (no usable image): ${dropped.length}`);
+  console.log(`  broken-image trap:        ${brokenVictim ? `serialized on ${brokenVictim.product.sku_group}` : "none"}`);
   await pool.end();
 }
 

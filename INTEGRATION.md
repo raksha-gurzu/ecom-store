@@ -48,18 +48,18 @@ query to get clean JSON. It can read, but **can never write** (verified).
 | **User** | `gurzu_readonly` |
 | **Password** | `readonly_pw` |
 
-**Connection string (use this — the engine runs in its own container):**
+**Connection string (use this — consumer running on this machine):**
 
 ```
-postgres://gurzu_readonly:readonly_pw@172.17.0.1:5433/merchant_catalog
+postgres://gurzu_readonly:readonly_pw@localhost:5433/merchant_catalog
 ```
 
 ⚠️ **The host part depends on where the consumer runs** — this is the #1 gotcha:
 
 | Consumer runs… | Host : Port | |
 |---|---|---|
-| inside its **own** Docker container (the engine) | `172.17.0.1:5433` | ✅ use this |
-| on your laptop (pgAdmin desktop, psql) | `localhost:5433` | host-native only |
+| on this machine (pgAdmin desktop, psql, a host-run engine) | `localhost:5433` | ✅ use this |
+| inside its **own** Docker container | `172.17.0.1:5433` | container-native only |
 | inside **this shop's** compose network (app, pgAdmin) | `db:5432` | internal only — **don't hand this out** |
 
 Inside a container `localhost` is that container itself, so a containerized consumer

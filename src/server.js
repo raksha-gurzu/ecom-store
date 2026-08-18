@@ -29,7 +29,16 @@ app.use(express.json({ limit: "2mb" }));
 
 // Static assets (no auth): storefront css/js + public product images.
 app.use(express.static(PUBLIC_DIR, { maxAge: "1h" }));
-app.use("/img", express.static(IMAGES_DIR, { fallthrough: true, maxAge: "1h" }));
+// Express 4's mime table predates AVIF, so .avif would go out as
+// application/octet-stream — browsers refuse to paint it and image pipelines
+// reject it. The scraper names files by their real format, so fix the type here.
+app.use("/img", express.static(IMAGES_DIR, {
+  fallthrough: true,
+  maxAge: "1h",
+  setHeaders(res, filePath) {
+    if (filePath.endsWith(".avif")) res.setHeader("Content-Type", "image/avif");
+  },
+}));
 
 // API-info page — the machine-facing endpoint reference (storefront now lives at /).
 app.get("/api-info", async (_req, res) => {
@@ -43,11 +52,11 @@ app.get("/api-info", async (_req, res) => {
   // EXTERNAL read-only connection string for OUTSIDE consumers (the engine).
   // NOT the app's own READONLY_DATABASE_URL — inside Docker that's `db:5432`,
   // which only resolves on the shop's compose network and is wrong to hand out.
-  // Outside consumers reach the DB via the published host port (5433). The engine
-  // itself runs in its own container, so the default host is the docker bridge
-  // gateway (172.17.0.1) — `localhost` there is the engine container, not the host.
+  // Outside consumers reach the DB via the published host port (5433). Default to
+  // localhost (consumer on this machine); a consumer in its own container must
+  // override PUBLIC_DB_URL with the bridge gateway 172.17.0.1 instead.
   const dbUrl = process.env.PUBLIC_DB_URL ||
-    "postgres://gurzu_readonly:readonly_pw@172.17.0.1:5433/merchant_catalog";
+    "postgres://gurzu_readonly:readonly_pw@localhost:5433/merchant_catalog";
   res
     .type("html")
     .send(`<!doctype html><meta charset="utf-8">
@@ -84,8 +93,8 @@ SELECT jsonb_agg(product) FROM catalog_json; -- whole catalog
 SELECT * FROM v_variants;                     -- flat rows (real variation_id + stock)</code></pre>
 <p class="muted"><b>Host depends on where you connect from:</b></p>
 <table>
-<tr><th>From a separate Docker container (the engine)</th><td><code>172.17.0.1</code> : <code>5433</code> ← use this</td></tr>
-<tr><th>From your laptop (psql, pgAdmin desktop)</th><td><code>localhost</code> : <code>5433</code></td></tr>
+<tr><th>From this machine (psql, pgAdmin desktop, a host-run engine)</th><td><code>localhost</code> : <code>5433</code> ← use this</td></tr>
+<tr><th>From a separate Docker container</th><td><code>172.17.0.1</code> : <code>5433</code> (localhost there = that container)</td></tr>
 <tr><th>Only inside THIS shop's compose net</th><td><code>db</code> : <code>5432</code> (don't hand this out)</td></tr>
 </table>
 <p class="muted">Image paths are relative (<code>/img/…</code>) — prefix with the base URL to download.</p>
@@ -119,9 +128,52 @@ app.get("/browse", (_req, res) => res.redirect(301, "/"));
 app.use("/", storeRouter);
 
 // Fallback 404 + error handler.
-app.use((_req, res) => res.status(404).json({ error: "not_found" }));
-app.use((err, _req, res, _next) => {
+// A browser asking for a page should get a page, even when the page is an error.
+// API clients (and anything under /api or /manage) still get JSON, so the machine
+// contract is unchanged — this only decides the FORM of an error, never its status.
+function wantsHtml(req) {
+  if (req.path.startsWith("/api") || req.path.startsWith("/manage")) return false;
+  return req.accepts(["html", "json"]) === "html";
+}
+
+function errorPage(status, heading, detail) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${status} — meesa</title><link rel="stylesheet" href="/store.css">
+<style>.err{max-width:560px;margin:12vh auto;padding:0 24px;text-align:center}
+.err h1{font-size:56px;margin:0;color:#e11d74}.err p{color:#666;line-height:1.6}
+.err a{color:#e11d74}</style></head><body>
+<div class="err"><h1>${status}</h1><p><b>${heading}</b></p><p>${detail}</p>
+<p><a href="/">← Back to the store</a></p></div></body></html>`;
+}
+
+app.use((req, res) => {
+  if (wantsHtml(req)) {
+    return res.status(404).type("html").send(
+      errorPage(404, "Page not found", "That address does not match anything on this store.")
+    );
+  }
+  res.status(404).json({ error: "not_found" });
+});
+app.use((err, req, res, _next) => {
+  // A malformed or oversized request body is the CLIENT's mistake, and
+  // body-parser already says so via err.status (400 entity.parse.failed,
+  // 413 entity.too.large). Reporting those as 500 tells the caller to retry
+  // something that can never succeed, and buries real server faults in noise.
+  const status = Number(err.status || err.statusCode);
+  if (status >= 400 && status < 500) {
+    console.warn(`[bad-request] ${status} ${err.type || err.name}: ${err.message}`);
+    return res.status(status).json({
+      error: status === 413 ? "payload_too_large" : "bad_request",
+    });
+  }
   console.error("[error]", err);
+  if (wantsHtml(req)) {
+    return res.status(500).type("html").send(
+      errorPage(500, "Something went wrong",
+        "The store is temporarily unavailable. Please try again in a moment.")
+    );
+  }
   res.status(500).json({ error: "internal_error" });
 });
 

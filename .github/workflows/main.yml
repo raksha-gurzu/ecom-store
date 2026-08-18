@@ -1,0 +1,190 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Main branch pipeline — the deployment gate.
+#
+# `main` is what gets deployed, so it gets everything CI runs plus the checks
+# that only make sense for a release:
+#
+#   checks          the full CI workflow (lint, contract suites, security)
+#   release-gate    deployability: the production stack starts from a cold volume
+#                   with only documented settings, and the snapshot restore path
+#                   still works
+#   publish         a tagged container image, once everything above is green
+#
+# Nothing here deploys on its own. It proves main is deployable and produces the
+# artifact; promoting that artifact stays a human decision.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Main
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: main-${{ github.ref }}
+  cancel-in-progress: false     # never cancel a release run half-way
+
+jobs:
+  checks:
+    name: Full CI
+    uses: ./.github/workflows/ci.yml
+
+  release-gate:
+    name: Deployability gate
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      COMPOSE_FILE: docker-compose.prod.yml
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # A deployment starts from documentation, not from tribal knowledge. If
+      # .env.prod.example is missing a setting the stack needs, this fails here
+      # rather than on someone's server at midnight.
+      - name: The stack must start from .env.prod.example alone
+        run: |
+          cp .env.prod.example .env
+          sed -i \
+            -e 's|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=http://localhost:4000|' \
+            -e 's|^READ_TOKEN=.*|READ_TOKEN=gate_read_token|' \
+            -e 's|^ADMIN_TOKEN=.*|ADMIN_TOKEN=gate_admin_token|' \
+            -e 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=gate_db_password|' \
+            -e 's|^READONLY_DB_PASSWORD=.*|READONLY_DB_PASSWORD=gate_readonly_password|' \
+            .env
+          if grep -q 'CHANGE-ME' .env; then
+            echo "::error::.env.prod.example has required values this gate does not know how to fill"
+            grep -n 'CHANGE-ME' .env
+            exit 1
+          fi
+          docker compose config --quiet
+          docker compose up -d --build
+
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 60); do
+            curl -fsS http://localhost:4000/health > /dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "::error::stack did not become healthy from the documented settings"
+          docker compose logs; exit 1
+
+      # Refusing to boot without a secret is a feature. Prove it still works,
+      # or the "fails loudly" promise in DEPLOY.md is just a claim.
+      - name: Missing secrets must stop the stack, not start it insecurely
+        run: |
+          docker compose down -v >/dev/null 2>&1
+          grep -v '^READ_TOKEN=' .env > .env.broken && mv .env.broken .env
+          if docker compose config --quiet 2>/dev/null; then
+            echo "::error::compose accepted a config with READ_TOKEN missing"
+            exit 1
+          fi
+          echo "confirmed: the stack refuses to start without READ_TOKEN"
+          git checkout -- .env 2>/dev/null || true
+
+      # The documented data path must work, since a deployment is useless
+      # without it and it is the step DevOps runs unattended.
+      - name: Snapshot restore path
+        run: |
+          cp .env.prod.example .env
+          sed -i \
+            -e 's|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=http://localhost:4000|' \
+            -e 's|^READ_TOKEN=.*|READ_TOKEN=gate_read_token|' \
+            -e 's|^ADMIN_TOKEN=.*|ADMIN_TOKEN=gate_admin_token|' \
+            -e 's|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=gate_db_password|' \
+            -e 's|^READONLY_DB_PASSWORD=.*|READONLY_DB_PASSWORD=gate_readonly_password|' \
+            .env
+          docker compose up -d --build
+          for i in $(seq 1 60); do curl -fsS http://localhost:4000/health >/dev/null 2>&1 && break; sleep 1; done
+
+          # Build a snapshot from the fixture, then restore it into a wiped stack.
+          docker compose exec -T db psql -q -v ON_ERROR_STOP=1 -U merchant -d merchant_catalog < db/ci-seed.sql
+          node scripts/ci-fixture-images.mjs ci-images
+          docker compose cp ci-images/. app:/app/images/
+
+          DB_CONTAINER=$(docker compose ps -q db | xargs docker inspect -f '{{.Name}}' | sed 's|^/||')
+          DB_CONTAINER="$DB_CONTAINER" IMAGES_DIR="$PWD/ci-images" ./scripts/export-seed.sh gate-seed
+          test -s gate-seed/catalog-data.sql
+          test -s gate-seed/images.tar.gz
+          cat gate-seed/MANIFEST.txt
+
+          docker compose down -v
+          docker compose up -d --build
+          for i in $(seq 1 60); do curl -fsS http://localhost:4000/health >/dev/null 2>&1 && break; sleep 1; done
+          ./scripts/restore-seed.sh gate-seed
+
+          COUNT=$(curl -fsS http://localhost:4000/health | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).products))')
+          if [ "$COUNT" != "7" ]; then
+            echo "::error::restore produced $COUNT products, expected 7"; exit 1
+          fi
+          echo "snapshot export → restore verified ($COUNT products)"
+
+      - name: Restore must refuse to overwrite an existing catalog
+        run: |
+          if ./scripts/restore-seed.sh gate-seed; then
+            echo "::error::restore overwrote a populated catalog without FORCE=1"
+            exit 1
+          fi
+          echo "confirmed: restore refuses to run twice"
+
+      - name: Logs (on failure)
+        if: failure()
+        run: docker compose logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
+
+  publish:
+    name: Publish image to GHCR
+    needs: release-gate
+    # Opt-in: set the repository variable PUBLISH_IMAGE to "true"
+    # (Settings → Secrets and variables → Actions → Variables) once DevOps wants
+    # to deploy a prebuilt image instead of building from source on the server.
+    if: vars.PUBLISH_IMAGE == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=sha,format=long
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summary
+        run: |
+          echo "### Image published" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "Deploy with APP_IMAGE set to one of the tags above (see DEPLOY.md)." >> $GITHUB_STEP_SUMMARY

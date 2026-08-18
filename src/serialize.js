@@ -41,13 +41,20 @@ function stockShape(stock, quirk) {
   return { stock: Number(stock) };
 }
 
+// The §5 broken-image trap: one option in the whole catalog points at a URL that
+// 404s, so the connector's image-download degradation path gets exercised. It is
+// injected HERE, not stored — the storefront reads the same rows and must render
+// the real photo. `idx` is the option's position (rows arrive ordered by it).
+const BROKEN_PHOTO = "/img/__broken__.jpg";
+
 // One option (variant) in the merchant's shape.
-function serializeOption(opt, quirk) {
+function serializeOption(opt, quirk, idx = 0) {
+  const photo = quirk === "broken_photo" && idx === 0 ? BROKEN_PHOTO : opt.photo;
   const base = {
     sku: opt.sku,
     ...priceShape(opt.amount, opt.currency, quirk),
     ...stockShape(opt.stock, quirk),
-    photo: publicPhoto(opt.photo),
+    photo: publicPhoto(photo),
   };
 
   if (quirk === "array_options") {
@@ -91,7 +98,7 @@ export function serializeProduct(product, options) {
       { photo: publicPhoto(product.base_photo) }
     );
   } else {
-    out.options = options.map((o) => serializeOption(o, quirk));
+    out.options = options.map((o, i) => serializeOption(o, quirk, i));
   }
 
   return out;

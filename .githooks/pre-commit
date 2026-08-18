@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Pre-commit hook — the fast checks, run before a commit is written.
+#
+# Install once per clone:  npm run hooks:install
+#
+# Design rules for this hook:
+#   • FAST. Anything over a few seconds gets bypassed with --no-verify, and a
+#     hook people routinely skip is worse than no hook.
+#   • No running services required. The four test suites need an app and a
+#     database, so they belong in CI, not here.
+#   • Stricter on protected branches. Committing straight to main or dev gets
+#     the full local check; a feature branch gets the quick one.
+#
+# Bypass deliberately with:  git commit --no-verify
+# NOTE: no `pipefail` here, deliberately. With pipefail, `git diff | grep -q` is a
+# false negative on a large diff: grep exits early on its first match, git dies of
+# SIGPIPE, and the pipeline reports failure — so a found secret reads as "clean".
+# Every scan below captures output instead of relying on a pipeline exit status.
+set -u
+
+BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+PROTECTED_RE='^(main|dev)$'
+failed=0
+
+say()  { printf '\033[1m%s\033[0m\n' "$*"; }
+pass() { printf '  \033[32m✓\033[0m %s\n' "$*"; }
+bad()  { printf '  \033[31m✗\033[0m %s\n' "$*"; failed=1; }
+
+say "pre-commit  (branch: $BRANCH)"
+
+# ── 1. secrets ──────────────────────────────────────────────────────────────
+# The one mistake that cannot be undone by a later commit: once a real
+# credential is in history it must be rotated, not just removed.
+staged="$(git diff --cached --name-only --diff-filter=ACM)"
+if [ -n "$(printf '%s\n' "$staged" | grep -x '.env' || true)" ]; then
+  bad ".env is staged — it holds real credentials and must never be committed"
+else
+  pass "no .env staged"
+fi
+
+if [ -n "$(printf '%s\n' "$staged" | grep -E '^(dist/|public/bundle\.js$|node_modules/|seed/)' || true)" ]; then
+  bad "build output or dependencies staged (dist/, public/bundle.js, node_modules/, seed/)"
+else
+  pass "no build output staged"
+fi
+
+# Obvious credential shapes in the staged diff. Deliberately narrow: a noisy
+# secret scanner trains people to ignore it.
+cred_hits="$(git diff --cached -U0 | grep -E '^\+.*(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|sk-[a-zA-Z0-9]{32,})' || true)"
+if [ -n "$cred_hits" ]; then
+  bad "a staged line looks like a real credential (AWS key, private key, or API key)"
+  printf '%s\n' "$cred_hits" | head -3 | sed 's/^/      /' 
+else
+  pass "no credential patterns in the staged diff"
+fi
+
+# ── 2. the code parses and builds ───────────────────────────────────────────
+if npm run --silent build >/dev/null 2>&1; then
+  pass "build succeeds (dist/ui.js + public/bundle.js)"
+else
+  bad "build FAILED — the server cannot start; run: npm run build"
+fi
+
+# ── 3. lint ─────────────────────────────────────────────────────────────────
+if npx --no-install eslint . >/tmp/precommit-lint.$$ 2>&1; then
+  pass "lint clean"
+else
+  bad "lint failed:"
+  sed 's/^/      /' /tmp/precommit-lint.$$ | tail -20
+fi
+rm -f /tmp/precommit-lint.$$
+
+# ── 3b. security unit tests ─────────────────────────────────────────────────
+# The HTML sanitiser guards against stored XSS and needs no running services,
+# so a regression is caught here rather than in CI minutes later.
+if node scripts/test-sanitize.mjs >/tmp/precommit-san.$$ 2>&1; then
+  pass "HTML sanitiser tests"
+else
+  bad "HTML sanitiser tests FAILED:"
+  grep '❌' /tmp/precommit-san.$$ | sed 's/^/      /' | head -6
+fi
+rm -f /tmp/precommit-san.$$
+
+# ── 4. repository structure and documentation ───────────────────────────────
+if node scripts/check-repo.mjs >/tmp/precommit-repo.$$ 2>&1; then
+  pass "repository structure and docs consistent"
+else
+  bad "structure check failed:"
+  grep '❌' /tmp/precommit-repo.$$ | sed 's/^/      /' | head -10
+fi
+rm -f /tmp/precommit-repo.$$
+
+# ── 5. protected branches get the extra scrutiny ────────────────────────────
+if [[ "$BRANCH" =~ $PROTECTED_RE ]]; then
+  say "protected branch — additional checks"
+
+  # main is what gets deployed; a WIP marker must not reach it.
+  wip_hits="$(git diff --cached -U0 | grep -E '^\+.*(FIXME|XXX|WIP\b)' || true)"
+  if [ "$BRANCH" = "main" ] && [ -n "$wip_hits" ]; then
+    bad "staged changes contain FIXME/XXX/WIP — not acceptable on main"
+  else
+    pass "no work-in-progress markers"
+  fi
+
+  # A merge conflict marker committed to a protected branch breaks everyone.
+  conflict_hits="$(git diff --cached -U0 | grep -E '^\+(<<<<<<<|>>>>>>>|=======$)' || true)"
+  if [ -n "$conflict_hits" ]; then
+    bad "unresolved merge conflict markers in staged changes"
+  else
+    pass "no conflict markers"
+  fi
+fi
+
+echo
+if [ "$failed" -ne 0 ]; then
+  printf '\033[31mpre-commit failed.\033[0m Fix the above, or bypass with: git commit --no-verify\n'
+  exit 1
+fi
+printf '\033[32mpre-commit passed.\033[0m\n'
+exit 0

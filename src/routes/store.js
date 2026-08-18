@@ -2,8 +2,8 @@
 // Reads via the read pool; no auth. Additive only — never touches the API contract.
 import { Router } from "express";
 import { readPool } from "../db.js";
-import { homeView } from "../views/home.js";
-import { productView } from "../views/product.js";
+import { renderPage } from "../views/render.js";
+import { productProps } from "../views/product-props.js";
 
 const router = Router();
 const PER_PAGE = 24;
@@ -39,7 +39,9 @@ async function renderGrid(res, { where = "", params = [], page, depts, active = 
     `${CARD_SELECT} ${where} ORDER BY pg.created_at, pg.sku_group LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
     [...params, PER_PAGE, (pg - 1) * PER_PAGE]
   );
-  res.type("html").send(homeView({ products, page: pg, totalPages, total, depts, active, q }));
+  res.type("html").send(
+    renderPage("home", { products, page: pg, totalPages, total, depts, active, q })
+  );
 }
 
 // Home + search (?q=)
@@ -77,14 +79,18 @@ router.get("/products/:skuGroup", async (req, res, next) => {
     if (!rows.length) {
       const depts = await getDepts();
       return res.status(404).type("html").send(
-        homeView({ products: [], page: 1, totalPages: 1, total: 0, depts, active: null, q: "" }));
+        renderPage("home", {
+          products: [], page: 1, totalPages: 1, total: 0, depts, active: null, q: "",
+        })
+      );
     }
     const [opts, imgs, depts] = await Promise.all([
       readPool.query("SELECT * FROM options WHERE sku_group=$1 ORDER BY position, sku", [req.params.skuGroup]),
       readPool.query("SELECT * FROM product_images WHERE sku_group=$1 ORDER BY position", [req.params.skuGroup]),
       getDepts(),
     ]);
-    res.type("html").send(productView({ product: rows[0], options: opts.rows, images: imgs.rows, depts }));
+    const props = productProps({ product: rows[0], options: opts.rows, images: imgs.rows });
+    res.type("html").send(renderPage("product", { ...props, depts }));
   } catch (err) { next(err); }
 });
 
